@@ -5,15 +5,26 @@
 #include <stdlib.h>
 #include <string.h>
 #include <inttypes.h>
+
+#if defined(_WIN32)
 #include <windows.h>
+#else
+#include <time.h>
+#endif
 
 static double now_sec(void)
 {
+#if defined(_WIN32)
     LARGE_INTEGER f;
     LARGE_INTEGER c;
     QueryPerformanceFrequency(&f);
     QueryPerformanceCounter(&c);
     return (double)c.QuadPart / (double)f.QuadPart;
+#else
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
+#endif
 }
 
 static void fmt8(uint32_t v, char out[9])
