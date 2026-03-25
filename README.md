@@ -5,6 +5,7 @@
 ![Language](https://img.shields.io/badge/Language-C99-blue)
 ![License](https://img.shields.io/badge/License-MIT-green)
 ![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey)
+[![CI](https://github.com/Vanderhell/num8/actions/workflows/ci.yml/badge.svg)](https://github.com/Vanderhell/num8/actions/workflows/ci.yml)
 
 ## Topics
 
