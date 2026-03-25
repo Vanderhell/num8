@@ -6,6 +6,20 @@
 ![License](https://img.shields.io/badge/License-MIT-green)
 ![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey)
 
+## Topics
+
+`c99`, `bitset`, `embedded`, `membership`, `lookup`, `zero-dependencies`, `file-format`, `mit`, `performance`, `data-structure`, `uint32`, `binary-format`
+
+## Wiki
+
+- [Home](https://github.com/Vanderhell/num8/wiki)
+- [Getting Started](https://github.com/Vanderhell/num8/wiki/Getting-Started)
+- [File Format](https://github.com/Vanderhell/num8/wiki/File-Format)
+- [API Reference](https://github.com/Vanderhell/num8/wiki/API-Reference)
+- [Performance](https://github.com/Vanderhell/num8/wiki/Performance)
+- [FAQ](https://github.com/Vanderhell/num8/wiki/FAQ)
+- [Troubleshooting](https://github.com/Vanderhell/num8/wiki/Troubleshooting)
+
 ## What is num8?
 
 num8 tracks whether 8-digit numbers (`00000000`-`99999999`) exist in a set. It stores only membership state, nothing else, and each number occupies exactly one bit in a fixed 12.5 MB payload.
