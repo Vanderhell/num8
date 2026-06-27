@@ -252,8 +252,10 @@ static uint32_t test_random32(uint64_t* state)
 
 static num8_open_mode_t test_invalid_open_mode(void)
 {
-    volatile int invalid_mode = 99;
-    return (num8_open_mode_t)invalid_mode;
+    int invalid_mode = 99;
+    num8_open_mode_t mode;
+    memcpy(&mode, &invalid_mode, sizeof(mode));
+    return mode;
 }
 
 static int test_builder_cases(const char* dir)
