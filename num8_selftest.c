@@ -277,7 +277,11 @@ static int test_builder_cases(const char* dir)
     case_suffix = (unsigned long long)getpid();
 #endif
 
+#if defined(_WIN32)
     ASSERT_TRUE(test_join_path(builder_path, sizeof(builder_path), dir, "num8_builder.exe"));
+#else
+    ASSERT_TRUE(test_join_path(builder_path, sizeof(builder_path), dir, "num8_builder"));
+#endif
     ASSERT_TRUE(test_format_name(input_name, sizeof(input_name), "num8_builder_input_", case_suffix, ".txt"));
     ASSERT_TRUE(test_format_name(output_name, sizeof(output_name), "num8_builder_output_", case_suffix, ".num8"));
     ASSERT_TRUE(test_format_name(temp_name, sizeof(temp_name), "num8_builder_output_", case_suffix, ".num8.tmp"));
