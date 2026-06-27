@@ -14,6 +14,7 @@ extern "C" {
 #define NUM8_DOMAIN_SIZE 100000000ull
 #define NUM8_PAYLOAD_SIZE 12500000u
 #define NUM8_MAX_VALUE 99999999u
+#define NUM8_ENGINE_STORAGE_SIZE 128u
 
 typedef enum num8_status_e
 {
@@ -39,7 +40,13 @@ typedef enum num8_status_e
     NUM8_STATUS_UNSUPPORTED_VERSION,
 
     NUM8_STATUS_READ_ONLY,
+    NUM8_STATUS_ALREADY_OPEN,
     NUM8_STATUS_NOT_OPEN,
+    NUM8_STATUS_INVALID_MODE,
+    NUM8_STATUS_LOCK_FAILED,
+    NUM8_STATUS_RECOVERY_REQUIRED,
+    NUM8_STATUS_GENERATION_EXHAUSTED,
+    NUM8_STATUS_ATOMIC_REPLACE_FAILED,
     NUM8_STATUS_OUT_OF_MEMORY
 } num8_status_t;
 
@@ -51,18 +58,8 @@ typedef enum num8_open_mode_e
 
 typedef struct num8_engine_s
 {
-    void* payload;
-    uint64_t set_count;
-    uint64_t generation;
-    uint32_t flags;
-
-    int is_open;
-    int is_dirty;
-    int is_read_only;
-
-    /* implementation-specific */
-    void* file_handle;
-    void* map_handle;
+    void* _alignment;
+    unsigned char opaque[NUM8_ENGINE_STORAGE_SIZE];
 } num8_engine_t;
 
 /* Creates a new .num8 file, initializes empty payload, and opens engine in read-write mode. */

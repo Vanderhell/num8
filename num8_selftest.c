@@ -15,11 +15,14 @@
 static int test_core(void)
 {
     const char* path = "num8_selftest_tmp.num8";
-    num8_engine_t e;
+    const char* missing_path = "num8_selftest_missing.num8";
+    num8_engine_t e = {0};
     int exists = -1;
     uint64_t count = 0;
 
     ASSERT_OK(num8_create(path, &e));
+    ASSERT_STATUS(num8_create(path, &e), NUM8_STATUS_ALREADY_OPEN);
+    ASSERT_STATUS(num8_open(path, NUM8_OPEN_READ_ONLY, &e), NUM8_STATUS_ALREADY_OPEN);
     ASSERT_OK(num8_count(&e, &count));
     ASSERT_TRUE(count == 0);
 
@@ -27,6 +30,8 @@ static int test_core(void)
     ASSERT_STATUS(num8_add_u32(&e, 99999999u), NUM8_STATUS_ADDED);
     ASSERT_STATUS(num8_add_u32(&e, 0u), NUM8_STATUS_ALREADY_EXISTS);
     ASSERT_STATUS(num8_add_u32(&e, 100000000u), NUM8_STATUS_INVALID_NUMBER);
+    ASSERT_STATUS(num8_exists_u32(&e, 100000000u, &exists), NUM8_STATUS_INVALID_NUMBER);
+    ASSERT_STATUS(num8_remove_u32(&e, 100000000u), NUM8_STATUS_INVALID_NUMBER);
 
     ASSERT_OK(num8_exists_u32(&e, 0u, &exists));
     ASSERT_TRUE(exists == 1);
@@ -45,6 +50,13 @@ static int test_core(void)
 
     ASSERT_OK(num8_flush(&e));
     ASSERT_OK(num8_validate(&e));
+    ASSERT_OK(num8_close(&e));
+    ASSERT_STATUS(num8_close(&e), NUM8_STATUS_NOT_OPEN);
+    ASSERT_STATUS(num8_open(path, (num8_open_mode_t)99, &e), NUM8_STATUS_INVALID_MODE);
+    ASSERT_STATUS(num8_open(missing_path, NUM8_OPEN_READ_ONLY, &e), NUM8_STATUS_OPEN_FAILED);
+    ASSERT_OK(num8_create(path, &e));
+    ASSERT_STATUS(num8_add_u32(&e, 99999999u), NUM8_STATUS_ADDED);
+    ASSERT_OK(num8_flush(&e));
     ASSERT_OK(num8_close(&e));
 
     ASSERT_OK(num8_open(path, NUM8_OPEN_READ_ONLY, &e));

@@ -10,11 +10,25 @@
 #include <unistd.h>
 #endif
 
-typedef struct num8_internal_s
+typedef struct num8_engine_state_s
 {
+    uint32_t magic;
+    FILE* file_handle;
+    uint8_t* payload;
+    uint64_t set_count;
+    uint64_t generation;
+    uint32_t flags;
     uint32_t payload_crc32;
     int payload_crc_enabled;
-} num8_internal_t;
+    int is_open;
+    int is_read_only;
+    int is_dirty;
+} num8_engine_state_t;
+
+typedef char num8_engine_storage_check_t[
+    (sizeof(num8_engine_state_t) <= NUM8_ENGINE_STORAGE_SIZE) ? 1 : -1];
+
+#define NUM8_ENGINE_STATE_MAGIC 0x4E583842u /* "NX8B" */
 
 typedef struct num8_header_fields_s
 {
@@ -38,8 +52,10 @@ static uint8_t num8_bit_mask(uint32_t value);
 static int num8_test_bit(const uint8_t* payload, uint32_t value);
 static void num8_set_bit(uint8_t* payload, uint32_t value);
 static void num8_clear_bit(uint8_t* payload, uint32_t value);
-static void num8_engine_reset(num8_engine_t* engine);
-static int num8_engine_ready(const num8_engine_t* engine);
+static int num8_engine_is_open(const num8_engine_t* engine);
+static num8_engine_state_t* num8_engine_state(num8_engine_t* engine);
+static const num8_engine_state_t* num8_engine_state_const(const num8_engine_t* engine);
+static void num8_engine_clear(num8_engine_t* engine);
 static uint32_t num8_crc32(const uint8_t* data, size_t len);
 static void num8_store_le16(uint8_t* p, uint16_t v);
 static void num8_store_le32(uint8_t* p, uint32_t v);
@@ -117,17 +133,48 @@ static void num8_clear_bit(uint8_t* payload, uint32_t value)
     payload[num8_byte_index(value)] = (uint8_t)(payload[num8_byte_index(value)] & (uint8_t)(~num8_bit_mask(value)));
 }
 
-static void num8_engine_reset(num8_engine_t* engine)
+static int num8_engine_is_open(const num8_engine_t* engine)
+{
+    const num8_engine_state_t* state = num8_engine_state_const(engine);
+    return state != NULL && state->is_open != 0;
+}
+
+static num8_engine_state_t* num8_engine_state(num8_engine_t* engine)
+{
+    if (engine == NULL)
+    {
+        return NULL;
+    }
+
+    if (((num8_engine_state_t*)(void*)engine->opaque)->magic != NUM8_ENGINE_STATE_MAGIC)
+    {
+        return NULL;
+    }
+
+    return (num8_engine_state_t*)(void*)engine->opaque;
+}
+
+static const num8_engine_state_t* num8_engine_state_const(const num8_engine_t* engine)
+{
+    if (engine == NULL)
+    {
+        return NULL;
+    }
+
+    if (((const num8_engine_state_t*)(const void*)engine->opaque)->magic != NUM8_ENGINE_STATE_MAGIC)
+    {
+        return NULL;
+    }
+
+    return (const num8_engine_state_t*)(const void*)engine->opaque;
+}
+
+static void num8_engine_clear(num8_engine_t* engine)
 {
     if (engine != NULL)
     {
-        memset(engine, 0, sizeof(*engine));
+        memset(engine->opaque, 0, sizeof(engine->opaque));
     }
-}
-
-static int num8_engine_ready(const num8_engine_t* engine)
-{
-    return engine != NULL && engine->is_open != 0 && engine->payload != NULL;
 }
 
 static uint32_t num8_crc32(const uint8_t* data, size_t len)
@@ -328,7 +375,8 @@ static num8_status_t num8_sync_file(FILE* f)
 
 static num8_status_t num8_validate_file_snapshot(const num8_engine_t* engine)
 {
-    FILE* f = (FILE*)engine->file_handle;
+    const num8_engine_state_t* state = num8_engine_state_const(engine);
+    FILE* f;
     long cur;
     long file_size;
     uint8_t header[NUM8_HEADER_SIZE];
@@ -336,9 +384,15 @@ static num8_status_t num8_validate_file_snapshot(const num8_engine_t* engine)
     num8_status_t st;
     uint32_t payload_crc;
 
+    if (state == NULL || state->is_open == 0)
+    {
+        return NUM8_STATUS_NOT_OPEN;
+    }
+
+    f = state->file_handle;
     if (f == NULL)
     {
-        return NUM8_STATUS_OK;
+        return NUM8_STATUS_IO_ERROR;
     }
 
     cur = ftell(f);
@@ -378,8 +432,7 @@ static num8_status_t num8_validate_file_snapshot(const num8_engine_t* engine)
 
     if (fields.payload_crc32 != 0u)
     {
-        uint8_t* payload = (uint8_t*)engine->payload;
-        payload_crc = num8_crc32(payload, NUM8_PAYLOAD_SIZE);
+        payload_crc = num8_crc32(state->payload, NUM8_PAYLOAD_SIZE);
         if (payload_crc != fields.payload_crc32)
         {
             return NUM8_STATUS_PAYLOAD_CRC_MISMATCH;
@@ -399,18 +452,23 @@ num8_status_t num8_create(const char* path, num8_engine_t* engine)
     FILE* f;
     uint8_t header[NUM8_HEADER_SIZE];
     uint8_t* payload;
-    num8_internal_t* internal;
+    num8_engine_state_t* state;
+    num8_status_t st;
 
     if (path == NULL || engine == NULL)
     {
         return NUM8_STATUS_INVALID_ARGUMENT;
     }
 
-    num8_engine_reset(engine);
+    if (num8_engine_is_open(engine))
+    {
+        return NUM8_STATUS_ALREADY_OPEN;
+    }
 
     f = fopen(path, "wb+");
     if (f == NULL)
     {
+        num8_engine_clear(engine);
         return NUM8_STATUS_CREATE_FAILED;
     }
 
@@ -418,14 +476,7 @@ num8_status_t num8_create(const char* path, num8_engine_t* engine)
     if (payload == NULL)
     {
         fclose(f);
-        return NUM8_STATUS_OUT_OF_MEMORY;
-    }
-
-    internal = (num8_internal_t*)calloc(1, sizeof(*internal));
-    if (internal == NULL)
-    {
-        free(payload);
-        fclose(f);
+        num8_engine_clear(engine);
         return NUM8_STATUS_OUT_OF_MEMORY;
     }
 
@@ -434,29 +485,34 @@ num8_status_t num8_create(const char* path, num8_engine_t* engine)
     if (fwrite(header, 1, NUM8_HEADER_SIZE, f) != NUM8_HEADER_SIZE
         || fwrite(payload, 1, NUM8_PAYLOAD_SIZE, f) != NUM8_PAYLOAD_SIZE)
     {
-        free(internal);
         free(payload);
         fclose(f);
+        num8_engine_clear(engine);
         return NUM8_STATUS_IO_ERROR;
     }
 
-    if (num8_sync_file(f) != NUM8_STATUS_OK)
+    st = num8_sync_file(f);
+    if (st != NUM8_STATUS_OK)
     {
-        free(internal);
         free(payload);
         fclose(f);
-        return NUM8_STATUS_FLUSH_FAILED;
+        num8_engine_clear(engine);
+        return st;
     }
 
-    engine->payload = payload;
-    engine->set_count = 0u;
-    engine->generation = 0u;
-    engine->flags = 0u;
-    engine->is_open = 1;
-    engine->is_dirty = 0;
-    engine->is_read_only = 0;
-    engine->file_handle = f;
-    engine->map_handle = internal;
+    state = (num8_engine_state_t*)(void*)engine->opaque;
+    memset(state, 0, sizeof(*state));
+    state->magic = NUM8_ENGINE_STATE_MAGIC;
+    state->file_handle = f;
+    state->payload = payload;
+    state->set_count = 0u;
+    state->generation = 0u;
+    state->flags = 0u;
+    state->payload_crc32 = 0u;
+    state->payload_crc_enabled = 0;
+    state->is_open = 1;
+    state->is_read_only = 0;
+    state->is_dirty = 0;
 
     return NUM8_STATUS_OK;
 }
@@ -467,7 +523,7 @@ num8_status_t num8_open(const char* path, num8_open_mode_t mode, num8_engine_t* 
     uint8_t header[NUM8_HEADER_SIZE];
     num8_header_fields_t fields;
     uint8_t* payload;
-    num8_internal_t* internal;
+    num8_engine_state_t* state;
     num8_status_t st;
 
     if (path == NULL || engine == NULL)
@@ -475,17 +531,26 @@ num8_status_t num8_open(const char* path, num8_open_mode_t mode, num8_engine_t* 
         return NUM8_STATUS_INVALID_ARGUMENT;
     }
 
-    num8_engine_reset(engine);
+    if (mode != NUM8_OPEN_READ_ONLY && mode != NUM8_OPEN_READ_WRITE)
+    {
+        return NUM8_STATUS_INVALID_MODE;
+    }
+    if (num8_engine_is_open(engine))
+    {
+        return NUM8_STATUS_ALREADY_OPEN;
+    }
 
     f = fopen(path, mode == NUM8_OPEN_READ_ONLY ? "rb" : "rb+");
     if (f == NULL)
     {
+        num8_engine_clear(engine);
         return NUM8_STATUS_OPEN_FAILED;
     }
 
     if (fread(header, 1, NUM8_HEADER_SIZE, f) != NUM8_HEADER_SIZE)
     {
         fclose(f);
+        num8_engine_clear(engine);
         return NUM8_STATUS_IO_ERROR;
     }
 
@@ -493,6 +558,7 @@ num8_status_t num8_open(const char* path, num8_open_mode_t mode, num8_engine_t* 
     if (st != NUM8_STATUS_OK)
     {
         fclose(f);
+        num8_engine_clear(engine);
         return st;
     }
 
@@ -500,6 +566,7 @@ num8_status_t num8_open(const char* path, num8_open_mode_t mode, num8_engine_t* 
     if (payload == NULL)
     {
         fclose(f);
+        num8_engine_clear(engine);
         return NUM8_STATUS_OUT_OF_MEMORY;
     }
 
@@ -507,40 +574,35 @@ num8_status_t num8_open(const char* path, num8_open_mode_t mode, num8_engine_t* 
     {
         free(payload);
         fclose(f);
+        num8_engine_clear(engine);
         return NUM8_STATUS_IO_ERROR;
     }
 
-    internal = (num8_internal_t*)calloc(1, sizeof(*internal));
-    if (internal == NULL)
-    {
-        free(payload);
-        fclose(f);
-        return NUM8_STATUS_OUT_OF_MEMORY;
-    }
-    internal->payload_crc32 = fields.payload_crc32;
-    internal->payload_crc_enabled = fields.payload_crc32 != 0u ? 1 : 0;
-
-    if (internal->payload_crc_enabled != 0)
+    if (fields.payload_crc32 != 0u)
     {
         uint32_t payload_crc = num8_crc32(payload, NUM8_PAYLOAD_SIZE);
-        if (payload_crc != internal->payload_crc32)
+        if (payload_crc != fields.payload_crc32)
         {
-            free(internal);
             free(payload);
             fclose(f);
-            return NUM8_STATUS_PAYLOAD_CRC_MISMATCH;
+            num8_engine_clear(engine);
+            return NUM8_STATUS_RECOVERY_REQUIRED;
         }
     }
 
-    engine->payload = payload;
-    engine->set_count = fields.set_count;
-    engine->generation = fields.generation;
-    engine->flags = fields.flags;
-    engine->is_open = 1;
-    engine->is_dirty = 0;
-    engine->is_read_only = mode == NUM8_OPEN_READ_ONLY ? 1 : 0;
-    engine->file_handle = f;
-    engine->map_handle = internal;
+    state = (num8_engine_state_t*)(void*)engine->opaque;
+    memset(state, 0, sizeof(*state));
+    state->magic = NUM8_ENGINE_STATE_MAGIC;
+    state->file_handle = f;
+    state->payload = payload;
+    state->set_count = fields.set_count;
+    state->generation = fields.generation;
+    state->flags = fields.flags;
+    state->payload_crc32 = fields.payload_crc32;
+    state->payload_crc_enabled = fields.payload_crc32 != 0u ? 1 : 0;
+    state->is_open = 1;
+    state->is_read_only = mode == NUM8_OPEN_READ_ONLY ? 1 : 0;
+    state->is_dirty = 0;
 
     return NUM8_STATUS_OK;
 }
@@ -548,19 +610,21 @@ num8_status_t num8_open(const char* path, num8_open_mode_t mode, num8_engine_t* 
 num8_status_t num8_close(num8_engine_t* engine)
 {
     FILE* f;
-    num8_internal_t* internal;
+    num8_engine_state_t* state;
     num8_status_t st;
 
     if (engine == NULL)
     {
         return NUM8_STATUS_INVALID_ARGUMENT;
     }
-    if (engine->is_open == 0)
+    state = num8_engine_state(engine);
+    if (state == NULL || state->is_open == 0)
     {
+        num8_engine_clear(engine);
         return NUM8_STATUS_NOT_OPEN;
     }
 
-    if (engine->is_read_only == 0 && engine->is_dirty != 0)
+    if (state->is_read_only == 0 && state->is_dirty != 0)
     {
         st = num8_flush(engine);
         if (st != NUM8_STATUS_OK)
@@ -569,36 +633,32 @@ num8_status_t num8_close(num8_engine_t* engine)
         }
     }
 
-    f = (FILE*)engine->file_handle;
+    f = state->file_handle;
     if (f != NULL)
     {
         fclose(f);
     }
 
-    if (engine->payload != NULL)
+    if (state->payload != NULL)
     {
-        free(engine->payload);
+        free(state->payload);
     }
 
-    internal = (num8_internal_t*)engine->map_handle;
-    if (internal != NULL)
-    {
-        free(internal);
-    }
-
-    num8_engine_reset(engine);
+    num8_engine_clear(engine);
     return NUM8_STATUS_OK;
 }
 
 num8_status_t num8_exists_u32(const num8_engine_t* engine, uint32_t value, int* out_exists)
 {
     const uint8_t* payload;
+    const num8_engine_state_t* state;
 
     if (engine == NULL || out_exists == NULL)
     {
         return NUM8_STATUS_INVALID_ARGUMENT;
     }
-    if (!num8_engine_ready(engine))
+    state = num8_engine_state_const(engine);
+    if (state == NULL || state->is_open == 0 || state->payload == NULL)
     {
         return NUM8_STATUS_NOT_OPEN;
     }
@@ -607,7 +667,7 @@ num8_status_t num8_exists_u32(const num8_engine_t* engine, uint32_t value, int* 
         return NUM8_STATUS_INVALID_NUMBER;
     }
 
-    payload = (const uint8_t*)engine->payload;
+    payload = state->payload;
     *out_exists = num8_test_bit(payload, value);
     return NUM8_STATUS_OK;
 }
@@ -615,16 +675,18 @@ num8_status_t num8_exists_u32(const num8_engine_t* engine, uint32_t value, int* 
 num8_status_t num8_add_u32(num8_engine_t* engine, uint32_t value)
 {
     uint8_t* payload;
+    num8_engine_state_t* state;
 
     if (engine == NULL)
     {
         return NUM8_STATUS_INVALID_ARGUMENT;
     }
-    if (!num8_engine_ready(engine))
+    state = num8_engine_state(engine);
+    if (state == NULL || state->is_open == 0 || state->payload == NULL)
     {
         return NUM8_STATUS_NOT_OPEN;
     }
-    if (engine->is_read_only != 0)
+    if (state->is_read_only != 0)
     {
         return NUM8_STATUS_READ_ONLY;
     }
@@ -633,31 +695,33 @@ num8_status_t num8_add_u32(num8_engine_t* engine, uint32_t value)
         return NUM8_STATUS_INVALID_NUMBER;
     }
 
-    payload = (uint8_t*)engine->payload;
+    payload = state->payload;
     if (num8_test_bit(payload, value))
     {
         return NUM8_STATUS_ALREADY_EXISTS;
     }
 
     num8_set_bit(payload, value);
-    engine->set_count++;
-    engine->is_dirty = 1;
+    state->set_count++;
+    state->is_dirty = 1;
     return NUM8_STATUS_ADDED;
 }
 
 num8_status_t num8_remove_u32(num8_engine_t* engine, uint32_t value)
 {
     uint8_t* payload;
+    num8_engine_state_t* state;
 
     if (engine == NULL)
     {
         return NUM8_STATUS_INVALID_ARGUMENT;
     }
-    if (!num8_engine_ready(engine))
+    state = num8_engine_state(engine);
+    if (state == NULL || state->is_open == 0 || state->payload == NULL)
     {
         return NUM8_STATUS_NOT_OPEN;
     }
-    if (engine->is_read_only != 0)
+    if (state->is_read_only != 0)
     {
         return NUM8_STATUS_READ_ONLY;
     }
@@ -666,15 +730,15 @@ num8_status_t num8_remove_u32(num8_engine_t* engine, uint32_t value)
         return NUM8_STATUS_INVALID_NUMBER;
     }
 
-    payload = (uint8_t*)engine->payload;
+    payload = state->payload;
     if (!num8_test_bit(payload, value))
     {
         return NUM8_STATUS_NOT_FOUND;
     }
 
     num8_clear_bit(payload, value);
-    engine->set_count--;
-    engine->is_dirty = 1;
+    state->set_count--;
+    state->is_dirty = 1;
     return NUM8_STATUS_REMOVED;
 }
 
@@ -722,36 +786,40 @@ num8_status_t num8_remove_str(num8_engine_t* engine, const char* number8)
 
 num8_status_t num8_count(const num8_engine_t* engine, uint64_t* out_count)
 {
+    const num8_engine_state_t* state;
     if (engine == NULL || out_count == NULL)
     {
         return NUM8_STATUS_INVALID_ARGUMENT;
     }
-    if (!num8_engine_ready(engine))
+    state = num8_engine_state_const(engine);
+    if (state == NULL || state->is_open == 0)
     {
         return NUM8_STATUS_NOT_OPEN;
     }
-    *out_count = engine->set_count;
+    *out_count = state->set_count;
     return NUM8_STATUS_OK;
 }
 
 num8_status_t num8_clear_all(num8_engine_t* engine)
 {
+    num8_engine_state_t* state;
     if (engine == NULL)
     {
         return NUM8_STATUS_INVALID_ARGUMENT;
     }
-    if (!num8_engine_ready(engine))
+    state = num8_engine_state(engine);
+    if (state == NULL || state->is_open == 0 || state->payload == NULL)
     {
         return NUM8_STATUS_NOT_OPEN;
     }
-    if (engine->is_read_only != 0)
+    if (state->is_read_only != 0)
     {
         return NUM8_STATUS_READ_ONLY;
     }
 
-    memset(engine->payload, 0, NUM8_PAYLOAD_SIZE);
-    engine->set_count = 0u;
-    engine->is_dirty = 1;
+    memset(state->payload, 0, NUM8_PAYLOAD_SIZE);
+    state->set_count = 0u;
+    state->is_dirty = 1;
     return NUM8_STATUS_OK;
 }
 
@@ -759,54 +827,61 @@ num8_status_t num8_flush(num8_engine_t* engine)
 {
     FILE* f;
     uint8_t header[NUM8_HEADER_SIZE];
-    num8_internal_t* internal;
+    num8_engine_state_t* state;
+    uint64_t next_generation;
+    uint32_t payload_crc32 = 0u;
 
     if (engine == NULL)
     {
         return NUM8_STATUS_INVALID_ARGUMENT;
     }
-    if (!num8_engine_ready(engine))
+    state = num8_engine_state(engine);
+    if (state == NULL || state->is_open == 0 || state->payload == NULL)
     {
         return NUM8_STATUS_NOT_OPEN;
     }
-    if (engine->is_read_only != 0)
+    if (state->is_read_only != 0)
     {
         return NUM8_STATUS_READ_ONLY;
     }
-    if (engine->is_dirty == 0)
+    if (state->is_dirty == 0)
     {
         return NUM8_STATUS_OK;
     }
 
-    f = (FILE*)engine->file_handle;
+    if (state->generation == UINT64_MAX)
+    {
+        return NUM8_STATUS_GENERATION_EXHAUSTED;
+    }
+
+    f = state->file_handle;
     if (f == NULL)
     {
         return NUM8_STATUS_IO_ERROR;
     }
 
-    engine->generation++;
+    next_generation = state->generation + 1u;
 
     if (fseek(f, NUM8_HEADER_SIZE, SEEK_SET) != 0)
     {
         return NUM8_STATUS_FLUSH_FAILED;
     }
-    if (fwrite(engine->payload, 1, NUM8_PAYLOAD_SIZE, f) != NUM8_PAYLOAD_SIZE)
+    if (fwrite(state->payload, 1, NUM8_PAYLOAD_SIZE, f) != NUM8_PAYLOAD_SIZE)
     {
         return NUM8_STATUS_FLUSH_FAILED;
     }
 
-    internal = (num8_internal_t*)engine->map_handle;
-    if (internal != NULL && internal->payload_crc_enabled != 0)
+    if (state->payload_crc_enabled != 0)
     {
-        internal->payload_crc32 = num8_crc32((const uint8_t*)engine->payload, NUM8_PAYLOAD_SIZE);
+        payload_crc32 = num8_crc32(state->payload, NUM8_PAYLOAD_SIZE);
     }
 
     num8_fill_header_bytes(
         header,
-        engine->set_count,
-        engine->generation,
-        engine->flags,
-        internal != NULL ? internal->payload_crc32 : 0u);
+        state->set_count,
+        next_generation,
+        state->flags,
+        payload_crc32);
 
     if (fseek(f, 0, SEEK_SET) != 0)
     {
@@ -822,7 +897,9 @@ num8_status_t num8_flush(num8_engine_t* engine)
         return NUM8_STATUS_FLUSH_FAILED;
     }
 
-    engine->is_dirty = 0;
+    state->generation = next_generation;
+    state->payload_crc32 = payload_crc32;
+    state->is_dirty = 0;
     return NUM8_STATUS_OK;
 }
 
@@ -831,40 +908,40 @@ num8_status_t num8_validate(const num8_engine_t* engine)
     const uint8_t* payload;
     uint64_t real_count;
     num8_status_t st;
-    num8_internal_t* internal;
+    const num8_engine_state_t* state;
 
     if (engine == NULL)
     {
         return NUM8_STATUS_INVALID_ARGUMENT;
     }
-    if (!num8_engine_ready(engine))
+    state = num8_engine_state_const(engine);
+    if (state == NULL || state->is_open == 0 || state->payload == NULL)
     {
         return NUM8_STATUS_NOT_OPEN;
     }
 
-    if (engine->set_count > NUM8_DOMAIN_SIZE || engine->flags != 0u)
+    if (state->set_count > NUM8_DOMAIN_SIZE)
     {
         return NUM8_STATUS_CORRUPTED;
     }
 
-    payload = (const uint8_t*)engine->payload;
+    payload = state->payload;
     real_count = num8_payload_popcount(payload);
-    if (real_count != engine->set_count)
+    if (real_count != state->set_count)
     {
         return NUM8_STATUS_CORRUPTED;
     }
 
-    internal = (num8_internal_t*)engine->map_handle;
-    if (internal != NULL && internal->payload_crc_enabled != 0)
+    if (state->payload_crc_enabled != 0)
     {
         uint32_t payload_crc = num8_crc32(payload, NUM8_PAYLOAD_SIZE);
-        if (payload_crc != internal->payload_crc32)
+        if (payload_crc != state->payload_crc32)
         {
             return NUM8_STATUS_PAYLOAD_CRC_MISMATCH;
         }
     }
 
-    if (engine->is_dirty == 0)
+    if (state->is_dirty == 0)
     {
         st = num8_validate_file_snapshot(engine);
         if (st != NUM8_STATUS_OK)

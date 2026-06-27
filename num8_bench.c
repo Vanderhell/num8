@@ -50,7 +50,7 @@ int main(void)
     const uint32_t n_str = 200000u;
     const uint32_t n_flush = 8u;
 
-    num8_engine_t e;
+    num8_engine_t e = {0};
     num8_status_t st;
     int ex = 0;
     double t0, t1;

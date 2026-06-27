@@ -17,7 +17,7 @@ static int trim_eol(char* s)
 int main(int argc, char** argv)
 {
     FILE* in;
-    num8_engine_t engine;
+    num8_engine_t engine = {0};
     char line[256];
     unsigned long long line_no = 0;
     unsigned long long added = 0;

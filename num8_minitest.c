@@ -9,7 +9,7 @@
 int main(void)
 {
     const char* path = "num8_minitest_tmp.num8";
-    num8_engine_t e;
+    num8_engine_t e = {0};
     int ex = 0;
     uint64_t cnt = 0;
 
