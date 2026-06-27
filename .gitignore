@@ -22,3 +22,14 @@ num8-zaklady.html
 num8-koncepty.html
 /build-baseline
 /prompts
+/build-wsl-gcc-c99-debug
+num8_wsl_full_verify.sh
+/build-wsl-clang-c99-debug
+/build-wsl-gcc-c11-debug
+/build-wsl-gcc-c11-release
+/build-wsl-gcc-c99-release
+/build-wsl-clang-c11-debug
+/build-wsl-clang-c99-release
+build-wsl-asan/.ninja_log
+/build-wsl-asan
+/build-wsl-clang-c11-release
