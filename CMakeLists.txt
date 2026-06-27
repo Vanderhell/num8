@@ -89,7 +89,9 @@ if(NUM8_BUILD_TESTS)
     )
     add_test(
         NAME num8_external_consumer
-        COMMAND ${CMAKE_COMMAND} -P ${CMAKE_CURRENT_BINARY_DIR}/num8_external_consumer.cmake
+        COMMAND ${CMAKE_COMMAND}
+            -DNUM8_TEST_INSTALL_CONFIG=$<CONFIG>
+            -P ${CMAKE_CURRENT_BINARY_DIR}/num8_external_consumer.cmake
     )
 endif()
 

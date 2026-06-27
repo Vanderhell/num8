@@ -5,7 +5,9 @@ set(generator "@NUM8_EXTERNAL_CONSUMER_GENERATOR@")
 set(platform "@NUM8_EXTERNAL_CONSUMER_PLATFORM@")
 set(toolset "@NUM8_EXTERNAL_CONSUMER_TOOLSET@")
 set(build_root "@CMAKE_CURRENT_BINARY_DIR@")
-set(install_config "@NUM8_TEST_INSTALL_CONFIG@")
+if(NOT DEFINED NUM8_TEST_INSTALL_CONFIG OR NUM8_TEST_INSTALL_CONFIG STREQUAL "")
+    set(NUM8_TEST_INSTALL_CONFIG "Release")
+endif()
 
 file(REMOVE_RECURSE "${prefix}" "${source_dir}" "${build_dir}")
 file(MAKE_DIRECTORY "${prefix}" "${source_dir}" "${build_dir}")
@@ -103,7 +105,7 @@ else()
 endif()
 
 execute_process(
-    COMMAND "${CMAKE_COMMAND}" --install "${build_root}" --config "${install_config}" --prefix "${prefix}"
+    COMMAND "${CMAKE_COMMAND}" --install "${build_root}" --config "${NUM8_TEST_INSTALL_CONFIG}" --prefix "${prefix}"
     RESULT_VARIABLE install_result
 )
 if(NOT install_result EQUAL 0)
@@ -125,7 +127,7 @@ if(NOT configure_result EQUAL 0)
 endif()
 
 execute_process(
-    COMMAND "${CMAKE_COMMAND}" --build "${build_dir}" --config "${install_config}"
+    COMMAND "${CMAKE_COMMAND}" --build "${build_dir}" --config "${NUM8_TEST_INSTALL_CONFIG}"
     RESULT_VARIABLE build_result
 )
 if(NOT build_result EQUAL 0)

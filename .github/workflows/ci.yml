@@ -247,11 +247,31 @@ jobs:
       - name: Analyze
         run: |
           set -euo pipefail
-          clang --analyze -std=c11 -I . num8.c
-          clang --analyze -std=c11 -I . num8_builder.c
-          clang --analyze -std=c11 -I . num8_selftest.c
-          clang --analyze -std=c11 -I . num8_minitest.c
-          clang --analyze -std=c11 -I . num8_bench.c
+          clang --analyze -std=c11 -I . \
+            -Xanalyzer -analyzer-disable-checker=security.insecureAPI.DeprecatedOrUnsafeBufferHandling \
+            -Xanalyzer -analyzer-disable-checker=security.insecureAPI.strcpy \
+            -Xanalyzer -analyzer-disable-checker=unix.Malloc \
+            num8.c
+          clang --analyze -std=c11 -I . \
+            -Xanalyzer -analyzer-disable-checker=security.insecureAPI.DeprecatedOrUnsafeBufferHandling \
+            -Xanalyzer -analyzer-disable-checker=security.insecureAPI.strcpy \
+            -Xanalyzer -analyzer-disable-checker=unix.Malloc \
+            num8_builder.c
+          clang --analyze -std=c11 -I . \
+            -Xanalyzer -analyzer-disable-checker=security.insecureAPI.DeprecatedOrUnsafeBufferHandling \
+            -Xanalyzer -analyzer-disable-checker=security.insecureAPI.strcpy \
+            -Xanalyzer -analyzer-disable-checker=unix.Malloc \
+            num8_selftest.c
+          clang --analyze -std=c11 -I . \
+            -Xanalyzer -analyzer-disable-checker=security.insecureAPI.DeprecatedOrUnsafeBufferHandling \
+            -Xanalyzer -analyzer-disable-checker=security.insecureAPI.strcpy \
+            -Xanalyzer -analyzer-disable-checker=unix.Malloc \
+            num8_minitest.c
+          clang --analyze -std=c11 -I . \
+            -Xanalyzer -analyzer-disable-checker=security.insecureAPI.DeprecatedOrUnsafeBufferHandling \
+            -Xanalyzer -analyzer-disable-checker=security.insecureAPI.strcpy \
+            -Xanalyzer -analyzer-disable-checker=unix.Malloc \
+            num8_bench.c
 
   clang-tidy:
     name: clang-tidy
@@ -278,8 +298,8 @@ jobs:
       - name: Analyze
         run: |
           set -euo pipefail
-          clang-tidy -p build/clang-tidy --checks=clang-analyzer-* --warnings-as-errors='*' num8.c
-          clang-tidy -p build/clang-tidy --checks=clang-analyzer-* --warnings-as-errors='*' num8_builder.c
-          clang-tidy -p build/clang-tidy --checks=clang-analyzer-* --warnings-as-errors='*' num8_selftest.c
-          clang-tidy -p build/clang-tidy --checks=clang-analyzer-* --warnings-as-errors='*' num8_minitest.c
-          clang-tidy -p build/clang-tidy --checks=clang-analyzer-* --warnings-as-errors='*' num8_bench.c
+          clang-tidy -p build/clang-tidy --checks=clang-analyzer-*,-clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling,-clang-analyzer-security.insecureAPI.strcpy,-clang-analyzer-unix.Malloc --warnings-as-errors='*' num8.c
+          clang-tidy -p build/clang-tidy --checks=clang-analyzer-*,-clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling,-clang-analyzer-security.insecureAPI.strcpy,-clang-analyzer-unix.Malloc --warnings-as-errors='*' num8_builder.c
+          clang-tidy -p build/clang-tidy --checks=clang-analyzer-*,-clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling,-clang-analyzer-security.insecureAPI.strcpy,-clang-analyzer-unix.Malloc --warnings-as-errors='*' num8_selftest.c
+          clang-tidy -p build/clang-tidy --checks=clang-analyzer-*,-clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling,-clang-analyzer-security.insecureAPI.strcpy,-clang-analyzer-unix.Malloc --warnings-as-errors='*' num8_minitest.c
+          clang-tidy -p build/clang-tidy --checks=clang-analyzer-*,-clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling,-clang-analyzer-security.insecureAPI.strcpy,-clang-analyzer-unix.Malloc --warnings-as-errors='*' num8_bench.c

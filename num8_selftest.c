@@ -6,6 +6,8 @@
 
 #if defined(_WIN32)
 #include <windows.h>
+#else
+#include <unistd.h>
 #endif
 
 #define ASSERT_OK(expr) do { num8_status_t _st = (expr); if (_st != NUM8_STATUS_OK) { \
@@ -156,6 +158,12 @@ static int test_join_path(char* out, size_t out_cap, const char* dir, const char
     return n >= 0 && (size_t)n < out_cap;
 }
 
+static int test_format_name(char* out, size_t out_cap, const char* prefix, unsigned long long suffix, const char* ext)
+{
+    int n = snprintf(out, out_cap, "%s%llu%s", prefix, suffix, ext);
+    return n >= 0 && (size_t)n < out_cap;
+}
+
 static int test_current_dir(char* out, size_t out_cap)
 {
 #if defined(_WIN32)
@@ -250,19 +258,36 @@ static int test_builder_cases(const char* dir)
     char temp_path[512];
     char fresh_output_path[512];
     char fresh_temp_path[512];
+    char input_name[128];
+    char output_name[128];
+    char temp_name[128];
+    char fresh_output_name[128];
+    char fresh_temp_name[128];
     uint8_t* before = NULL;
     uint8_t* after = NULL;
     size_t before_bytes = 0;
     size_t after_bytes = 0;
     uint64_t count = 0;
     num8_engine_t e = {0};
+    unsigned long long case_suffix;
+
+#if defined(_WIN32)
+    case_suffix = (unsigned long long)GetCurrentProcessId();
+#else
+    case_suffix = (unsigned long long)getpid();
+#endif
 
     ASSERT_TRUE(test_join_path(builder_path, sizeof(builder_path), dir, "num8_builder.exe"));
-    ASSERT_TRUE(test_join_path(input_path, sizeof(input_path), dir, "num8_builder_input.txt"));
-    ASSERT_TRUE(test_join_path(output_path, sizeof(output_path), dir, "num8_builder_output.num8"));
-    ASSERT_TRUE(test_join_path(temp_path, sizeof(temp_path), dir, "num8_builder_output.num8.tmp"));
-    ASSERT_TRUE(test_join_path(fresh_output_path, sizeof(fresh_output_path), dir, "num8_builder_fresh_output.num8"));
-    ASSERT_TRUE(test_join_path(fresh_temp_path, sizeof(fresh_temp_path), dir, "num8_builder_fresh_output.num8.tmp"));
+    ASSERT_TRUE(test_format_name(input_name, sizeof(input_name), "num8_builder_input_", case_suffix, ".txt"));
+    ASSERT_TRUE(test_format_name(output_name, sizeof(output_name), "num8_builder_output_", case_suffix, ".num8"));
+    ASSERT_TRUE(test_format_name(temp_name, sizeof(temp_name), "num8_builder_output_", case_suffix, ".num8.tmp"));
+    ASSERT_TRUE(test_format_name(fresh_output_name, sizeof(fresh_output_name), "num8_builder_fresh_output_", case_suffix, ".num8"));
+    ASSERT_TRUE(test_format_name(fresh_temp_name, sizeof(fresh_temp_name), "num8_builder_fresh_output_", case_suffix, ".num8.tmp"));
+    ASSERT_TRUE(test_join_path(input_path, sizeof(input_path), dir, input_name));
+    ASSERT_TRUE(test_join_path(output_path, sizeof(output_path), dir, output_name));
+    ASSERT_TRUE(test_join_path(temp_path, sizeof(temp_path), dir, temp_name));
+    ASSERT_TRUE(test_join_path(fresh_output_path, sizeof(fresh_output_path), dir, fresh_output_name));
+    ASSERT_TRUE(test_join_path(fresh_temp_path, sizeof(fresh_temp_path), dir, fresh_temp_name));
 
     remove(input_path);
     remove(output_path);
@@ -396,13 +421,22 @@ static int test_builder_cases(const char* dir)
 static int test_model_randomized(const char* dir)
 {
     char path[512];
+    char path_name[128];
     num8_engine_t e = {0};
     uint8_t* model = NULL;
     uint64_t model_count = 0;
     uint64_t seed = 0x9E3779B97F4A7C15ull;
     unsigned step;
+    unsigned long long case_suffix;
 
-    ASSERT_TRUE(test_join_path(path, sizeof(path), dir, "num8_model_random.num8"));
+#if defined(_WIN32)
+    case_suffix = (unsigned long long)GetCurrentProcessId();
+#else
+    case_suffix = (unsigned long long)getpid();
+#endif
+
+    ASSERT_TRUE(test_format_name(path_name, sizeof(path_name), "num8_model_random_", case_suffix, ".num8"));
+    ASSERT_TRUE(test_join_path(path, sizeof(path), dir, path_name));
     remove(path);
 
     model = (uint8_t*)calloc(NUM8_PAYLOAD_SIZE, 1);
@@ -561,11 +595,25 @@ static int test_model_randomized(const char* dir)
 
 static int test_core(void)
 {
-    const char* path = "num8_selftest_tmp.num8";
-    const char* missing_path = "num8_selftest_missing.num8";
+    char path_name[128];
+    char missing_name[128];
+    char path[256];
+    char missing_path[256];
     num8_engine_t e = {0};
     int exists = -1;
     uint64_t count = 0;
+    unsigned long long case_suffix;
+
+#if defined(_WIN32)
+    case_suffix = (unsigned long long)GetCurrentProcessId();
+#else
+    case_suffix = (unsigned long long)getpid();
+#endif
+
+    ASSERT_TRUE(test_format_name(path_name, sizeof(path_name), "num8_selftest_tmp_", case_suffix, ".num8"));
+    ASSERT_TRUE(test_format_name(missing_name, sizeof(missing_name), "num8_selftest_missing_", case_suffix, ".num8"));
+    ASSERT_TRUE(test_join_path(path, sizeof(path), ".", path_name));
+    ASSERT_TRUE(test_join_path(missing_path, sizeof(missing_path), ".", missing_name));
 
     remove(path);
     remove(missing_path);
