@@ -9,6 +9,7 @@
 #include <windows.h>
 #else
 #include <fcntl.h>
+#include <sys/file.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #endif
@@ -26,6 +27,7 @@ typedef struct num8_engine_state_s
     int is_open;
     int is_read_only;
     int is_dirty;
+    int lock_shared;
     char* path;
 } num8_engine_state_t;
 
@@ -63,6 +65,8 @@ static const num8_engine_state_t* num8_engine_state_const(const num8_engine_t* e
 static void num8_engine_clear(num8_engine_t* engine);
 static char* num8_strdup_local(const char* s);
 static void num8_state_release(num8_engine_state_t* state);
+static num8_status_t num8_lock_file(FILE* f, int shared);
+static void num8_unlock_file(FILE* f);
 static num8_status_t num8_validate_path_state(const num8_engine_state_t* state);
 static num8_status_t num8_sync_parent_dir(const char* path);
 static num8_status_t num8_atomic_replace_file(const char* temp_path, const char* dest_path);
@@ -226,6 +230,7 @@ static void num8_state_release(num8_engine_state_t* state)
 
     if (state->file_handle != NULL)
     {
+        num8_unlock_file(state->file_handle);
         fclose(state->file_handle);
         state->file_handle = NULL;
     }
@@ -242,6 +247,91 @@ static void num8_state_release(num8_engine_state_t* state)
     state->is_open = 0;
     state->is_dirty = 0;
     state->is_read_only = 0;
+}
+
+static num8_status_t num8_lock_file(FILE* f, int shared)
+{
+#if defined(_WIN32)
+    HANDLE h;
+    OVERLAPPED ov;
+
+    if (f == NULL)
+    {
+        return NUM8_STATUS_INVALID_ARGUMENT;
+    }
+
+    h = (HANDLE)_get_osfhandle(_fileno(f));
+    if (h == INVALID_HANDLE_VALUE)
+    {
+        return NUM8_STATUS_LOCK_FAILED;
+    }
+    memset(&ov, 0, sizeof(ov));
+    if (LockFileEx(
+            h,
+            (shared != 0 ? 0u : LOCKFILE_EXCLUSIVE_LOCK) | LOCKFILE_FAIL_IMMEDIATELY,
+            0u,
+            0xFFFFFFFFu,
+            0xFFFFFFFFu,
+            &ov) == 0)
+    {
+        return NUM8_STATUS_LOCK_FAILED;
+    }
+    return NUM8_STATUS_OK;
+#else
+    int fd;
+    int rc;
+
+    if (f == NULL)
+    {
+        return NUM8_STATUS_INVALID_ARGUMENT;
+    }
+
+    fd = fileno(f);
+    if (fd < 0)
+    {
+        return NUM8_STATUS_LOCK_FAILED;
+    }
+    rc = flock(fd, shared != 0 ? LOCK_SH | LOCK_NB : LOCK_EX | LOCK_NB);
+    if (rc != 0)
+    {
+        return NUM8_STATUS_LOCK_FAILED;
+    }
+    return NUM8_STATUS_OK;
+#endif
+}
+
+static void num8_unlock_file(FILE* f)
+{
+#if defined(_WIN32)
+    HANDLE h;
+    OVERLAPPED ov;
+
+    if (f == NULL)
+    {
+        return;
+    }
+
+    h = (HANDLE)_get_osfhandle(_fileno(f));
+    if (h == INVALID_HANDLE_VALUE)
+    {
+        return;
+    }
+    memset(&ov, 0, sizeof(ov));
+    UnlockFileEx(h, 0u, 0xFFFFFFFFu, 0xFFFFFFFFu, &ov);
+#else
+    int fd;
+
+    if (f == NULL)
+    {
+        return;
+    }
+    fd = fileno(f);
+    if (fd < 0)
+    {
+        return;
+    }
+    flock(fd, LOCK_UN);
+#endif
 }
 
 static num8_status_t num8_validate_path_state(const num8_engine_state_t* state)
@@ -735,6 +825,14 @@ num8_status_t num8_create(const char* path, num8_engine_t* engine)
         num8_engine_clear(engine);
         return NUM8_STATUS_CREATE_FAILED;
     }
+    st = num8_lock_file(state->file_handle, 0);
+    if (st != NUM8_STATUS_OK)
+    {
+        num8_state_release(state);
+        free(temp_path);
+        num8_engine_clear(engine);
+        return st;
+    }
     state->payload = payload;
     state->path = num8_strdup_local(path);
     if (state->path == NULL)
@@ -752,15 +850,7 @@ num8_status_t num8_create(const char* path, num8_engine_t* engine)
     state->is_open = 1;
     state->is_read_only = 0;
     state->is_dirty = 0;
-
-    st = num8_validate_file_snapshot(engine);
-    if (st != NUM8_STATUS_OK)
-    {
-        num8_state_release(state);
-        free(temp_path);
-        num8_engine_clear(engine);
-        return st;
-    }
+    state->lock_shared = 0;
 
     free(temp_path);
     return NUM8_STATUS_OK;
@@ -795,6 +885,13 @@ num8_status_t num8_open(const char* path, num8_open_mode_t mode, num8_engine_t* 
         num8_engine_clear(engine);
         return NUM8_STATUS_OPEN_FAILED;
     }
+    st = num8_lock_file(f, mode == NUM8_OPEN_READ_ONLY ? 1 : 0);
+    if (st != NUM8_STATUS_OK)
+    {
+        fclose(f);
+        num8_engine_clear(engine);
+        return st;
+    }
 
     if (fread(header, 1, NUM8_HEADER_SIZE, f) != NUM8_HEADER_SIZE)
     {
@@ -826,6 +923,28 @@ num8_status_t num8_open(const char* path, num8_open_mode_t mode, num8_engine_t* 
         num8_engine_clear(engine);
         return NUM8_STATUS_IO_ERROR;
     }
+    if (fgetc(f) != EOF)
+    {
+        free(payload);
+        fclose(f);
+        num8_engine_clear(engine);
+        return NUM8_STATUS_SIZE_MISMATCH;
+    }
+
+    if (num8_crc32(payload, NUM8_PAYLOAD_SIZE) != fields.payload_crc32)
+    {
+        free(payload);
+        fclose(f);
+        num8_engine_clear(engine);
+        return NUM8_STATUS_PAYLOAD_CRC_MISMATCH;
+    }
+    if (num8_payload_popcount(payload) != fields.set_count)
+    {
+        free(payload);
+        fclose(f);
+        num8_engine_clear(engine);
+        return NUM8_STATUS_CORRUPTED;
+    }
 
     state = (num8_engine_state_t*)(void*)engine->opaque;
     memset(state, 0, sizeof(*state));
@@ -847,14 +966,7 @@ num8_status_t num8_open(const char* path, num8_open_mode_t mode, num8_engine_t* 
     state->is_open = 1;
     state->is_read_only = mode == NUM8_OPEN_READ_ONLY ? 1 : 0;
     state->is_dirty = 0;
-
-    st = num8_validate_file_snapshot(engine);
-    if (st != NUM8_STATUS_OK)
-    {
-        num8_state_release(state);
-        num8_engine_clear(engine);
-        return st;
-    }
+    state->lock_shared = mode == NUM8_OPEN_READ_ONLY ? 1 : 0;
 
     return NUM8_STATUS_OK;
 }
@@ -1227,6 +1339,7 @@ num8_status_t num8_validate_disk(const num8_engine_t* engine)
 {
     const num8_engine_state_t* state;
     num8_status_t st;
+    int relock_needed = 0;
 
     if (engine == NULL)
     {
@@ -1238,7 +1351,20 @@ num8_status_t num8_validate_disk(const num8_engine_t* engine)
         return NUM8_STATUS_NOT_OPEN;
     }
 
+    if (state->file_handle != NULL)
+    {
+        num8_unlock_file(state->file_handle);
+        relock_needed = 1;
+    }
+
     st = num8_validate_file_snapshot(engine);
+    if (relock_needed != 0 && state->file_handle != NULL)
+    {
+        if (num8_lock_file(state->file_handle, state->lock_shared) != NUM8_STATUS_OK)
+        {
+            return NUM8_STATUS_LOCK_FAILED;
+        }
+    }
     return st;
 }
 

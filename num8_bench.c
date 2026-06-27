@@ -58,6 +58,7 @@ int main(void)
     uint64_t seed = 88172645463393265ull;
     uint64_t ok = 0;
 
+    remove(path);
     st = num8_create(path, &e);
     if (st != NUM8_STATUS_OK)
     {

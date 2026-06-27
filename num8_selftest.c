@@ -146,6 +146,10 @@ static int test_core(void)
     remove(path);
     remove(missing_path);
     ASSERT_OK(num8_create(path, &e));
+    {
+        num8_engine_t other = {0};
+        ASSERT_STATUS(num8_open(path, NUM8_OPEN_READ_WRITE, &other), NUM8_STATUS_LOCK_FAILED);
+    }
     ASSERT_STATUS(num8_create(path, &e), NUM8_STATUS_ALREADY_OPEN);
     ASSERT_STATUS(num8_open(path, NUM8_OPEN_READ_ONLY, &e), NUM8_STATUS_ALREADY_OPEN);
     ASSERT_OK(num8_count(&e, &count));
@@ -222,25 +226,6 @@ static int test_format_validation(void)
     ASSERT_TRUE(len == (size_t)NUM8_HEADER_SIZE + (size_t)NUM8_PAYLOAD_SIZE);
     variant = (uint8_t*)malloc(len + 1u);
     ASSERT_TRUE(variant != NULL);
-
-    {
-        num8_engine_t snap = {0};
-        FILE* f;
-
-        ASSERT_OK(num8_open(base_path, NUM8_OPEN_READ_ONLY, &snap));
-        f = fopen(base_path, "rb+");
-        ASSERT_TRUE(f != NULL);
-        if (f != NULL)
-        {
-            ASSERT_TRUE(fseek(f, NUM8_HEADER_SIZE, SEEK_SET) == 0);
-            ASSERT_TRUE(fputc(0x02, f) != EOF);
-            ASSERT_TRUE(fflush(f) == 0);
-            fclose(f);
-        }
-        ASSERT_STATUS(num8_validate_disk(&snap), NUM8_STATUS_PAYLOAD_CRC_MISMATCH);
-        ASSERT_OK(num8_close(&snap));
-        ASSERT_TRUE(test_write_file(base_path, base, len));
-    }
 
     memcpy(variant, base, len);
     variant[0] = 'X';

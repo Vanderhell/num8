@@ -13,6 +13,7 @@ int main(void)
     int ex = 0;
     uint64_t cnt = 0;
 
+    remove(path);
     T_OK(num8_create(path, &e));
 
     T_ST(num8_add_str(&e, "1234567"), NUM8_STATUS_INVALID_FORMAT);
