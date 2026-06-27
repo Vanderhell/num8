@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.16)
 project(num8
-    VERSION 1.0.0
+    VERSION 2.0.0
     DESCRIPTION "O(1) membership engine for 8-digit numbers"
     LANGUAGES C
 )
