@@ -250,6 +250,12 @@ static uint32_t test_random32(uint64_t* state)
     return (uint32_t)(*state >> 32);
 }
 
+static num8_open_mode_t test_invalid_open_mode(void)
+{
+    volatile int invalid_mode = 99;
+    return (num8_open_mode_t)invalid_mode;
+}
+
 static int test_builder_cases(const char* dir)
 {
     char builder_path[512];
@@ -659,7 +665,7 @@ static int test_core(void)
     ASSERT_OK(num8_validate(&e));
     ASSERT_OK(num8_close(&e));
     ASSERT_STATUS(num8_close(&e), NUM8_STATUS_NOT_OPEN);
-    ASSERT_STATUS(num8_open(path, (num8_open_mode_t)99, &e), NUM8_STATUS_INVALID_MODE);
+    ASSERT_STATUS(num8_open(path, test_invalid_open_mode(), &e), NUM8_STATUS_INVALID_MODE);
     ASSERT_STATUS(num8_open(missing_path, NUM8_OPEN_READ_ONLY, &e), NUM8_STATUS_OPEN_FAILED);
     ASSERT_STATUS(num8_create(path, &e), NUM8_STATUS_ALREADY_EXISTS);
 
