@@ -4,6 +4,10 @@
 #include <stdlib.h>
 #include <string.h>
 
+#if defined(_WIN32)
+#include <windows.h>
+#endif
+
 #define ASSERT_OK(expr) do { num8_status_t _st = (expr); if (_st != NUM8_STATUS_OK) { \
     fprintf(stderr, "ASSERT_OK failed at %s:%d status=%d\n", __FILE__, __LINE__, (int)_st); return 1; } } while (0)
 
@@ -133,6 +137,426 @@ static int test_expect_open_status(const char* path, num8_status_t expected)
         }
     }
     return 1;
+}
+
+static int test_join_path(char* out, size_t out_cap, const char* dir, const char* name)
+{
+    int n;
+#if defined(_WIN32)
+    const char sep = '\\';
+#else
+    const char sep = '/';
+#endif
+
+    if (out == NULL || dir == NULL || name == NULL)
+    {
+        return 0;
+    }
+    n = snprintf(out, out_cap, "%s%c%s", dir, sep, name);
+    return n >= 0 && (size_t)n < out_cap;
+}
+
+static int test_current_dir(char* out, size_t out_cap)
+{
+#if defined(_WIN32)
+    char module[MAX_PATH];
+    char* slash;
+    DWORD n = GetModuleFileNameA(NULL, module, (DWORD)sizeof(module));
+    if (n == 0 || n >= sizeof(module))
+    {
+        return 0;
+    }
+    slash = strrchr(module, '\\');
+    if (slash == NULL)
+    {
+        return 0;
+    }
+    *slash = '\0';
+    if (strlen(module) + 1u > out_cap)
+    {
+        return 0;
+    }
+    strcpy(out, module);
+    return 1;
+#else
+    if (getcwd(out, out_cap) == NULL)
+    {
+        return 0;
+    }
+    return 1;
+#endif
+}
+
+static int test_file_exists(const char* path)
+{
+    FILE* f = fopen(path, "rb");
+    if (f == NULL)
+    {
+        return 0;
+    }
+    fclose(f);
+    return 1;
+}
+
+static int test_run_builder(const char* builder_path, const char* input_path, const char* output_path)
+{
+#if defined(_WIN32)
+    STARTUPINFOA si;
+    PROCESS_INFORMATION pi;
+    DWORD exit_code = 1u;
+    char cmd[1024];
+    int n = snprintf(cmd, sizeof(cmd), "\"%s\" \"%s\" \"%s\"", builder_path, input_path, output_path);
+    if (n < 0 || (size_t)n >= sizeof(cmd))
+    {
+        return 0;
+    }
+    memset(&si, 0, sizeof(si));
+    memset(&pi, 0, sizeof(pi));
+    si.cb = sizeof(si);
+    if (CreateProcessA(NULL, cmd, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi) == 0)
+    {
+        return 0;
+    }
+    WaitForSingleObject(pi.hProcess, INFINITE);
+    if (GetExitCodeProcess(pi.hProcess, &exit_code) == 0)
+    {
+        exit_code = 1u;
+    }
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    return exit_code == 0u;
+#else
+    char cmd[1024];
+    int n = snprintf(cmd, sizeof(cmd), "\"%s\" \"%s\" \"%s\"", builder_path, input_path, output_path);
+    if (n < 0 || (size_t)n >= sizeof(cmd))
+    {
+        return 0;
+    }
+    return system(cmd) == 0;
+#endif
+}
+
+static uint32_t test_random32(uint64_t* state)
+{
+    *state = *state * 6364136223846793005ull + 1ull;
+    return (uint32_t)(*state >> 32);
+}
+
+static int test_builder_cases(const char* dir)
+{
+    char builder_path[512];
+    char input_path[512];
+    char output_path[512];
+    char temp_path[512];
+    char fresh_output_path[512];
+    char fresh_temp_path[512];
+    uint8_t* before = NULL;
+    uint8_t* after = NULL;
+    size_t before_bytes = 0;
+    size_t after_bytes = 0;
+    uint64_t count = 0;
+    num8_engine_t e = {0};
+
+    ASSERT_TRUE(test_join_path(builder_path, sizeof(builder_path), dir, "num8_builder.exe"));
+    ASSERT_TRUE(test_join_path(input_path, sizeof(input_path), dir, "num8_builder_input.txt"));
+    ASSERT_TRUE(test_join_path(output_path, sizeof(output_path), dir, "num8_builder_output.num8"));
+    ASSERT_TRUE(test_join_path(temp_path, sizeof(temp_path), dir, "num8_builder_output.num8.tmp"));
+    ASSERT_TRUE(test_join_path(fresh_output_path, sizeof(fresh_output_path), dir, "num8_builder_fresh_output.num8"));
+    ASSERT_TRUE(test_join_path(fresh_temp_path, sizeof(fresh_temp_path), dir, "num8_builder_fresh_output.num8.tmp"));
+
+    remove(input_path);
+    remove(output_path);
+    remove(temp_path);
+    remove(fresh_output_path);
+    remove(fresh_temp_path);
+
+    ASSERT_TRUE(test_write_file(input_path, (const uint8_t*)"00000000\n00000001\n00000001\n99999999\n", 36u));
+    ASSERT_TRUE(test_run_builder(builder_path, input_path, output_path));
+    ASSERT_TRUE(!test_file_exists(temp_path));
+    ASSERT_OK(num8_open(output_path, NUM8_OPEN_READ_ONLY, &e));
+    ASSERT_OK(num8_count(&e, &count));
+    ASSERT_TRUE(count == 3u);
+    ASSERT_OK(num8_close(&e));
+
+    ASSERT_TRUE(test_write_file(input_path, (const uint8_t*)"00000000\n00000002\n", 18u));
+    ASSERT_TRUE(test_run_builder(builder_path, input_path, output_path));
+    ASSERT_TRUE(!test_file_exists(temp_path));
+    ASSERT_OK(num8_open(output_path, NUM8_OPEN_READ_ONLY, &e));
+    ASSERT_OK(num8_count(&e, &count));
+    ASSERT_TRUE(count == 2u);
+    ASSERT_OK(num8_close(&e));
+
+    ASSERT_TRUE(test_read_file(output_path, &before, &before_bytes));
+
+    remove(input_path);
+    ASSERT_TRUE(test_write_file(input_path, (const uint8_t*)"00000000\n1234567\n00000002\n", 26u));
+    ASSERT_TRUE(!test_run_builder(builder_path, input_path, output_path));
+    ASSERT_TRUE(!test_file_exists(temp_path));
+    ASSERT_TRUE(test_read_file(output_path, &after, &after_bytes));
+    ASSERT_TRUE(before_bytes == after_bytes);
+    ASSERT_TRUE(memcmp(before, after, before_bytes) == 0);
+    free(after);
+    after = NULL;
+
+    remove(input_path);
+    ASSERT_TRUE(test_write_file(input_path, (const uint8_t*)"00000000\n\n00000002\n", 19u));
+    ASSERT_TRUE(!test_run_builder(builder_path, input_path, output_path));
+    ASSERT_TRUE(!test_file_exists(temp_path));
+
+    remove(input_path);
+    ASSERT_TRUE(test_write_file(input_path, (const uint8_t*)"0000000\n00000002\n", 17u));
+    ASSERT_TRUE(!test_run_builder(builder_path, input_path, output_path));
+    ASSERT_TRUE(!test_file_exists(temp_path));
+
+    remove(input_path);
+    ASSERT_TRUE(test_write_file(input_path, (const uint8_t*)"000000000\n00000002\n", 19u));
+    ASSERT_TRUE(!test_run_builder(builder_path, input_path, output_path));
+    ASSERT_TRUE(!test_file_exists(temp_path));
+
+    remove(input_path);
+    ASSERT_TRUE(test_write_file(input_path, (const uint8_t*)"0000000A\n00000002\n", 18u));
+    ASSERT_TRUE(!test_run_builder(builder_path, input_path, output_path));
+    ASSERT_TRUE(!test_file_exists(temp_path));
+
+    remove(input_path);
+    {
+        char oversized[320];
+        size_t i;
+        for (i = 0; i + 2u < sizeof(oversized); ++i)
+        {
+            oversized[i] = '1';
+        }
+        oversized[sizeof(oversized) - 2u] = '\n';
+        oversized[sizeof(oversized) - 1u] = '\0';
+        ASSERT_TRUE(test_write_file(input_path, (const uint8_t*)oversized, sizeof(oversized) - 1u));
+        ASSERT_TRUE(!test_run_builder(builder_path, input_path, output_path));
+        ASSERT_TRUE(!test_file_exists(temp_path));
+    }
+
+    remove(input_path);
+    ASSERT_TRUE(test_write_file(input_path, (const uint8_t*)"00000000\n00000002", 17u));
+    ASSERT_TRUE(!test_run_builder(builder_path, input_path, output_path));
+    ASSERT_TRUE(!test_file_exists(temp_path));
+
+    ASSERT_TRUE(test_read_file(output_path, &after, &after_bytes));
+    ASSERT_TRUE(before_bytes == after_bytes);
+    ASSERT_TRUE(memcmp(before, after, before_bytes) == 0);
+    free(after);
+    after = NULL;
+
+    ASSERT_TRUE(test_write_file(input_path, (const uint8_t*)"00000000\n00000001\n00000002\n", 27u));
+    ASSERT_TRUE(test_run_builder(builder_path, input_path, fresh_output_path));
+    ASSERT_TRUE(!test_file_exists(fresh_temp_path));
+    ASSERT_OK(num8_open(fresh_output_path, NUM8_OPEN_READ_ONLY, &e));
+    ASSERT_OK(num8_count(&e, &count));
+    ASSERT_TRUE(count == 3u);
+    ASSERT_OK(num8_close(&e));
+
+    ASSERT_TRUE(test_write_file(input_path, (const uint8_t*)"00000000\n00000001\n00000002\n00000003\n", 36u));
+    ASSERT_TRUE(test_run_builder(builder_path, input_path, fresh_output_path));
+    ASSERT_TRUE(!test_file_exists(fresh_temp_path));
+    ASSERT_OK(num8_open(fresh_output_path, NUM8_OPEN_READ_ONLY, &e));
+    ASSERT_OK(num8_count(&e, &count));
+    ASSERT_TRUE(count == 4u);
+    ASSERT_OK(num8_close(&e));
+
+#if defined(_WIN32)
+    {
+        HANDLE held = CreateFileA(output_path, GENERIC_READ, 0, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+        ASSERT_TRUE(held != INVALID_HANDLE_VALUE);
+        if (held != INVALID_HANDLE_VALUE)
+        {
+            remove(input_path);
+            ASSERT_TRUE(test_write_file(input_path, (const uint8_t*)"00000000\n00000003\n", 18u));
+            ASSERT_TRUE(!test_run_builder(builder_path, input_path, output_path));
+            ASSERT_TRUE(!test_file_exists(temp_path));
+            CloseHandle(held);
+        }
+    }
+#endif
+
+    remove(input_path);
+    remove(fresh_output_path);
+    remove(fresh_temp_path);
+    ASSERT_TRUE(test_write_file(input_path, (const uint8_t*)"00000000\n\n00000001\n", 19u));
+    ASSERT_TRUE(!test_run_builder(builder_path, input_path, fresh_output_path));
+    ASSERT_TRUE(!test_file_exists(fresh_output_path));
+    ASSERT_TRUE(!test_file_exists(fresh_temp_path));
+
+    remove(input_path);
+    remove(output_path);
+    remove(temp_path);
+    remove(fresh_output_path);
+    remove(fresh_temp_path);
+    free(before);
+    free(after);
+    return 0;
+}
+
+static int test_model_randomized(const char* dir)
+{
+    char path[512];
+    num8_engine_t e = {0};
+    uint8_t* model = NULL;
+    uint64_t model_count = 0;
+    uint64_t seed = 0x9E3779B97F4A7C15ull;
+    unsigned step;
+
+    ASSERT_TRUE(test_join_path(path, sizeof(path), dir, "num8_model_random.num8"));
+    remove(path);
+
+    model = (uint8_t*)calloc(NUM8_PAYLOAD_SIZE, 1);
+    ASSERT_TRUE(model != NULL);
+    ASSERT_OK(num8_create(path, &e));
+
+    for (step = 0; step < 300u; ++step)
+    {
+        uint32_t op = test_random32(&seed) % 6u;
+        uint32_t value = test_random32(&seed) % NUM8_DOMAIN_SIZE;
+        int exists = -1;
+        uint64_t count = 0;
+        num8_status_t st;
+
+        switch (op)
+        {
+            case 0:
+                st = num8_add_u32(&e, value);
+                if (model[value >> 3] & (uint8_t)(1u << (value & 7u)))
+                {
+                    if (st != NUM8_STATUS_ALREADY_EXISTS)
+                    {
+                        fprintf(stderr, "MODEL FAIL seed=%llu step=%u op=add value=%u status=%d\n",
+                                (unsigned long long)seed, step, value, (int)st);
+                        free(model);
+                        return 1;
+                    }
+                }
+                else
+                {
+                    if (st != NUM8_STATUS_ADDED)
+                    {
+                        fprintf(stderr, "MODEL FAIL seed=%llu step=%u op=add value=%u status=%d\n",
+                                (unsigned long long)seed, step, value, (int)st);
+                        free(model);
+                        return 1;
+                    }
+                    model[value >> 3] |= (uint8_t)(1u << (value & 7u));
+                    model_count++;
+                }
+                break;
+            case 1:
+                st = num8_remove_u32(&e, value);
+                if (model[value >> 3] & (uint8_t)(1u << (value & 7u)))
+                {
+                    if (st != NUM8_STATUS_REMOVED)
+                    {
+                        fprintf(stderr, "MODEL FAIL seed=%llu step=%u op=remove value=%u status=%d\n",
+                                (unsigned long long)seed, step, value, (int)st);
+                        free(model);
+                        return 1;
+                    }
+                    model[value >> 3] &= (uint8_t)~(uint8_t)(1u << (value & 7u));
+                    model_count--;
+                }
+                else
+                {
+                    if (st != NUM8_STATUS_NOT_FOUND)
+                    {
+                        fprintf(stderr, "MODEL FAIL seed=%llu step=%u op=remove value=%u status=%d\n",
+                                (unsigned long long)seed, step, value, (int)st);
+                        free(model);
+                        return 1;
+                    }
+                }
+                break;
+            case 2:
+                st = num8_exists_u32(&e, value, &exists);
+                if (st != NUM8_STATUS_OK)
+                {
+                    fprintf(stderr, "MODEL FAIL seed=%llu step=%u op=exists value=%u status=%d\n",
+                            (unsigned long long)seed, step, value, (int)st);
+                    free(model);
+                    return 1;
+                }
+                if (((model[value >> 3] >> (value & 7u)) & 1u) != (unsigned)exists)
+                {
+                    fprintf(stderr, "MODEL FAIL seed=%llu step=%u op=exists value=%u mismatch\n",
+                            (unsigned long long)seed, step, value);
+                    free(model);
+                    return 1;
+                }
+                break;
+            case 3:
+                st = num8_flush(&e);
+                if (st != NUM8_STATUS_OK)
+                {
+                    fprintf(stderr, "MODEL FAIL seed=%llu step=%u op=flush status=%d\n",
+                            (unsigned long long)seed, step, (int)st);
+                    free(model);
+                    return 1;
+                }
+                break;
+            case 4:
+                st = num8_validate(&e);
+                if (st != NUM8_STATUS_OK)
+                {
+                    fprintf(stderr, "MODEL FAIL seed=%llu step=%u op=validate status=%d\n",
+                            (unsigned long long)seed, step, (int)st);
+                    free(model);
+                    return 1;
+                }
+                break;
+            case 5:
+                st = num8_close(&e);
+                if (st != NUM8_STATUS_OK)
+                {
+                    fprintf(stderr, "MODEL FAIL seed=%llu step=%u op=close status=%d\n",
+                            (unsigned long long)seed, step, (int)st);
+                    free(model);
+                    return 1;
+                }
+                st = num8_open(path, NUM8_OPEN_READ_WRITE, &e);
+                if (st != NUM8_STATUS_OK)
+                {
+                    fprintf(stderr, "MODEL FAIL seed=%llu step=%u op=reopen status=%d\n",
+                            (unsigned long long)seed, step, (int)st);
+                    free(model);
+                    return 1;
+                }
+                break;
+        }
+
+        if (num8_count(&e, &count) != NUM8_STATUS_OK || count != model_count)
+        {
+            fprintf(stderr, "MODEL FAIL seed=%llu step=%u count mismatch expected=%llu got=%llu\n",
+                    (unsigned long long)seed, step,
+                    (unsigned long long)model_count,
+                    (unsigned long long)count);
+            free(model);
+            return 1;
+        }
+
+        if (num8_exists_u32(&e, value, &exists) != NUM8_STATUS_OK
+            || (((model[value >> 3] >> (value & 7u)) & 1u) != (unsigned)exists))
+        {
+            fprintf(stderr, "MODEL FAIL seed=%llu step=%u probe mismatch value=%u\n",
+                    (unsigned long long)seed, step, value);
+            free(model);
+            return 1;
+        }
+        if (num8_validate(&e) != NUM8_STATUS_OK)
+        {
+            fprintf(stderr, "MODEL FAIL seed=%llu step=%u validate mismatch\n",
+                    (unsigned long long)seed, step);
+            free(model);
+            return 1;
+        }
+    }
+
+    ASSERT_OK(num8_close(&e));
+    remove(path);
+    free(model);
+    return 0;
 }
 
 static int test_core(void)
@@ -334,12 +758,28 @@ static int test_format_validation(void)
 
 int main(void)
 {
+    char dir[512];
     int rc = test_core();
     if (rc != 0)
     {
         return rc;
     }
     rc = test_format_validation();
+    if (rc != 0)
+    {
+        return rc;
+    }
+    if (!test_current_dir(dir, sizeof(dir)))
+    {
+        fprintf(stderr, "failed to locate test directory\n");
+        return 1;
+    }
+    rc = test_builder_cases(dir);
+    if (rc != 0)
+    {
+        return rc;
+    }
+    rc = test_model_randomized(dir);
     if (rc != 0)
     {
         return rc;

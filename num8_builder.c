@@ -19,6 +19,18 @@ static int trim_eol(char* s)
     return (int)n;
 }
 
+static void cleanup_temp_output(num8_engine_t* engine, const char* temp_path)
+{
+    if (engine != NULL)
+    {
+        (void)num8_close(engine);
+    }
+    if (temp_path != NULL)
+    {
+        remove(temp_path);
+    }
+}
+
 static int install_temp_output(const char* temp_path, const char* output_path)
 {
 #if defined(_WIN32)
@@ -28,16 +40,113 @@ static int install_temp_output(const char* temp_path, const char* output_path)
 #endif
 }
 
+static int read_builder_line(
+    FILE* in,
+    char* line,
+    size_t cap,
+    unsigned long long* line_no,
+    int* saw_input,
+    int* ended_with_newline,
+    num8_status_t* out_status)
+{
+    size_t len;
+    int ch;
+
+    if (fgets(line, (int)cap, in) == NULL)
+    {
+        if (ferror(in))
+        {
+            if (out_status != NULL)
+            {
+                *out_status = NUM8_STATUS_IO_ERROR;
+            }
+            return -1;
+        }
+        if (out_status != NULL)
+        {
+            *out_status = NUM8_STATUS_OK;
+        }
+        return 0;
+    }
+
+    if (saw_input != NULL)
+    {
+        *saw_input = 1;
+    }
+    if (line_no != NULL)
+    {
+        (*line_no)++;
+    }
+
+    len = strlen(line);
+    if (len == 0u)
+    {
+        if (out_status != NULL)
+        {
+            *out_status = NUM8_STATUS_IO_ERROR;
+        }
+        return -1;
+    }
+
+    if (line[len - 1] != '\n')
+    {
+        if (!feof(in))
+        {
+            do
+            {
+                ch = fgetc(in);
+            } while (ch != EOF && ch != '\n');
+            if (out_status != NULL)
+            {
+                *out_status = NUM8_STATUS_SIZE_MISMATCH;
+            }
+            return -1;
+        }
+        if (ended_with_newline != NULL)
+        {
+            *ended_with_newline = 0;
+        }
+        if (out_status != NULL)
+        {
+            *out_status = NUM8_STATUS_INVALID_FORMAT;
+        }
+        return -1;
+    }
+
+    trim_eol(line);
+    if (ended_with_newline != NULL)
+    {
+        *ended_with_newline = 1;
+    }
+    if (line[0] == '\0')
+    {
+        if (out_status != NULL)
+        {
+            *out_status = NUM8_STATUS_INVALID_FORMAT;
+        }
+        return -1;
+    }
+
+    if (out_status != NULL)
+    {
+        *out_status = NUM8_STATUS_OK;
+    }
+    return 1;
+}
+
 int main(int argc, char** argv)
 {
     FILE* in;
     num8_engine_t engine = {0};
+    num8_engine_t verify = {0};
     char temp_out[512];
     char line[256];
     unsigned long long line_no = 0;
     unsigned long long added = 0;
     unsigned long long duplicates = 0;
     int saw_input = 0;
+    int ended_with_newline = 1;
+    num8_status_t st;
 
     if (argc != 3)
     {
@@ -67,22 +176,41 @@ int main(int argc, char** argv)
         return 1;
     }
 
-    while (fgets(line, (int)sizeof(line), in) != NULL)
+    for (;;)
     {
-        num8_status_t st;
-        line_no++;
-        saw_input = 1;
-        trim_eol(line);
-
-        if (line[0] == '\0')
+        int line_rc = read_builder_line(in, line, sizeof(line), &line_no, &saw_input, &ended_with_newline, &st);
+        if (line_rc == 0)
         {
-            fprintf(stderr, "Invalid empty line at %llu\n", line_no);
-            num8_close(&engine);
-            remove(temp_out);
+            break;
+        }
+        if (line_rc < 0 && st == NUM8_STATUS_INVALID_FORMAT && !ended_with_newline)
+        {
+            fprintf(stderr, "Missing final newline at line %llu\n", line_no);
+            cleanup_temp_output(&engine, temp_out);
             fclose(in);
             return 1;
         }
-
+        if (line_rc < 0 && st == NUM8_STATUS_SIZE_MISMATCH)
+        {
+            fprintf(stderr, "Oversized line at %llu\n", line_no);
+            cleanup_temp_output(&engine, temp_out);
+            fclose(in);
+            return 1;
+        }
+        if (line_rc < 0 && st == NUM8_STATUS_IO_ERROR)
+        {
+            fprintf(stderr, "Input read error at %llu\n", line_no + 1u);
+            cleanup_temp_output(&engine, temp_out);
+            fclose(in);
+            return 1;
+        }
+        if (line[0] == '\0')
+        {
+            fprintf(stderr, "Invalid empty line at %llu\n", line_no);
+            cleanup_temp_output(&engine, temp_out);
+            fclose(in);
+            return 1;
+        }
         st = num8_add_str(&engine, line);
         if (st == NUM8_STATUS_ADDED)
         {
@@ -96,8 +224,7 @@ int main(int argc, char** argv)
         }
 
         fprintf(stderr, "Invalid value at line %llu: '%s' (status=%d)\n", line_no, line, (int)st);
-        num8_close(&engine);
-        remove(temp_out);
+        cleanup_temp_output(&engine, temp_out);
         fclose(in);
         return 1;
     }
@@ -107,15 +234,13 @@ int main(int argc, char** argv)
     if (!saw_input)
     {
         fprintf(stderr, "Input is empty\n");
-        num8_close(&engine);
-        remove(temp_out);
+        cleanup_temp_output(&engine, temp_out);
         return 1;
     }
 
     if (num8_flush(&engine) != NUM8_STATUS_OK)
     {
-        num8_close(&engine);
-        remove(temp_out);
+        cleanup_temp_output(&engine, temp_out);
         fprintf(stderr, "Flush failed\n");
         return 1;
     }
@@ -124,6 +249,26 @@ int main(int argc, char** argv)
     {
         remove(temp_out);
         fprintf(stderr, "Close failed\n");
+        return 1;
+    }
+
+    if (num8_open(temp_out, NUM8_OPEN_READ_ONLY, &verify) != NUM8_STATUS_OK)
+    {
+        remove(temp_out);
+        fprintf(stderr, "Validation open failed: %s\n", temp_out);
+        return 1;
+    }
+    if (num8_validate(&verify) != NUM8_STATUS_OK)
+    {
+        num8_close(&verify);
+        remove(temp_out);
+        fprintf(stderr, "Validation failed: %s\n", temp_out);
+        return 1;
+    }
+    if (num8_close(&verify) != NUM8_STATUS_OK)
+    {
+        remove(temp_out);
+        fprintf(stderr, "Validation close failed: %s\n", temp_out);
         return 1;
     }
 

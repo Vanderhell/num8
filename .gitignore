@@ -15,3 +15,10 @@ Testing/
 x64/
 *.tlog
 *.log
+bitset_space_calculator.html
+num8-diel3.html
+num8-notes.html
+num8-zaklady.html
+num8-koncepty.html
+/build-baseline
+/prompts
