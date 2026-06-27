@@ -6,7 +6,10 @@
 
 #if defined(_WIN32)
 #include <io.h>
+#include <windows.h>
 #else
+#include <fcntl.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #endif
 
@@ -23,6 +26,7 @@ typedef struct num8_engine_state_s
     int is_open;
     int is_read_only;
     int is_dirty;
+    char* path;
 } num8_engine_state_t;
 
 typedef char num8_engine_storage_check_t[
@@ -42,7 +46,8 @@ typedef struct num8_header_fields_s
     uint32_t header_crc32;
     uint32_t payload_crc32;
     uint64_t generation;
-    uint8_t reserved[12];
+    uint32_t commit_state;
+    uint8_t reserved[8];
 } num8_header_fields_t;
 
 static int num8_is_valid_u32(uint32_t value);
@@ -56,6 +61,19 @@ static int num8_engine_is_open(const num8_engine_t* engine);
 static num8_engine_state_t* num8_engine_state(num8_engine_t* engine);
 static const num8_engine_state_t* num8_engine_state_const(const num8_engine_t* engine);
 static void num8_engine_clear(num8_engine_t* engine);
+static char* num8_strdup_local(const char* s);
+static void num8_state_release(num8_engine_state_t* state);
+static num8_status_t num8_validate_path_state(const num8_engine_state_t* state);
+static num8_status_t num8_sync_parent_dir(const char* path);
+static num8_status_t num8_atomic_replace_file(const char* temp_path, const char* dest_path);
+static num8_status_t num8_write_store_file(
+    const char* path,
+    const uint8_t* payload,
+    uint64_t set_count,
+    uint64_t generation,
+    uint32_t flags,
+    uint32_t payload_crc32,
+    uint32_t commit_state);
 static uint32_t num8_crc32(const uint8_t* data, size_t len);
 static void num8_store_le16(uint8_t* p, uint16_t v);
 static void num8_store_le32(uint8_t* p, uint32_t v);
@@ -68,7 +86,8 @@ static void num8_fill_header_bytes(
     uint64_t set_count,
     uint64_t generation,
     uint32_t flags,
-    uint32_t payload_crc32);
+    uint32_t payload_crc32,
+    uint32_t commit_state);
 static num8_status_t num8_parse_and_validate_header(const uint8_t* header, num8_header_fields_t* out_fields);
 static uint64_t num8_payload_popcount(const uint8_t* payload);
 static num8_status_t num8_sync_file(FILE* f);
@@ -177,6 +196,174 @@ static void num8_engine_clear(num8_engine_t* engine)
     }
 }
 
+static char* num8_strdup_local(const char* s)
+{
+    size_t len;
+    char* copy;
+
+    if (s == NULL)
+    {
+        return NULL;
+    }
+
+    len = strlen(s);
+    copy = (char*)malloc(len + 1u);
+    if (copy == NULL)
+    {
+        return NULL;
+    }
+
+    memcpy(copy, s, len + 1u);
+    return copy;
+}
+
+static void num8_state_release(num8_engine_state_t* state)
+{
+    if (state == NULL)
+    {
+        return;
+    }
+
+    if (state->file_handle != NULL)
+    {
+        fclose(state->file_handle);
+        state->file_handle = NULL;
+    }
+    if (state->payload != NULL)
+    {
+        free(state->payload);
+        state->payload = NULL;
+    }
+    if (state->path != NULL)
+    {
+        free(state->path);
+        state->path = NULL;
+    }
+    state->is_open = 0;
+    state->is_dirty = 0;
+    state->is_read_only = 0;
+}
+
+static num8_status_t num8_validate_path_state(const num8_engine_state_t* state)
+{
+    if (state == NULL || state->path == NULL || state->path[0] == '\0')
+    {
+        return NUM8_STATUS_INVALID_ARGUMENT;
+    }
+    return NUM8_STATUS_OK;
+}
+
+static num8_status_t num8_sync_parent_dir(const char* path)
+{
+#if defined(_WIN32)
+    (void)path;
+    return NUM8_STATUS_OK;
+#else
+    char dirbuf[1024];
+    size_t len;
+    const char* slash = NULL;
+    int fd;
+    int rc;
+
+    if (path == NULL)
+    {
+        return NUM8_STATUS_INVALID_ARGUMENT;
+    }
+
+    slash = strrchr(path, '/');
+    if (slash == NULL)
+    {
+        return NUM8_STATUS_OK;
+    }
+    len = (size_t)(slash - path);
+    if (len == 0u)
+    {
+        dirbuf[0] = '/';
+        dirbuf[1] = '\0';
+    }
+    else
+    {
+        if (len >= sizeof(dirbuf))
+        {
+            return NUM8_STATUS_FLUSH_FAILED;
+        }
+        memcpy(dirbuf, path, len);
+        dirbuf[len] = '\0';
+    }
+
+    fd = open(dirbuf, O_RDONLY);
+    if (fd < 0)
+    {
+        return NUM8_STATUS_FLUSH_FAILED;
+    }
+    rc = fsync(fd);
+    close(fd);
+    if (rc != 0)
+    {
+        return NUM8_STATUS_FLUSH_FAILED;
+    }
+    return NUM8_STATUS_OK;
+#endif
+}
+
+static num8_status_t num8_atomic_replace_file(const char* temp_path, const char* dest_path)
+{
+#if defined(_WIN32)
+    if (MoveFileExA(temp_path, dest_path, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) == 0)
+    {
+        return NUM8_STATUS_ATOMIC_REPLACE_FAILED;
+    }
+    return NUM8_STATUS_OK;
+#else
+    if (rename(temp_path, dest_path) != 0)
+    {
+        return NUM8_STATUS_ATOMIC_REPLACE_FAILED;
+    }
+    return NUM8_STATUS_OK;
+#endif
+}
+
+static num8_status_t num8_write_store_file(
+    const char* path,
+    const uint8_t* payload,
+    uint64_t set_count,
+    uint64_t generation,
+    uint32_t flags,
+    uint32_t payload_crc32,
+    uint32_t commit_state)
+{
+    FILE* f;
+    uint8_t header[NUM8_HEADER_SIZE];
+    num8_status_t st;
+
+    f = fopen(path, "wb+");
+    if (f == NULL)
+    {
+        return NUM8_STATUS_IO_ERROR;
+    }
+
+    num8_fill_header_bytes(header, set_count, generation, flags, payload_crc32, commit_state);
+
+    if (fwrite(header, 1, NUM8_HEADER_SIZE, f) != NUM8_HEADER_SIZE
+        || fwrite(payload, 1, NUM8_PAYLOAD_SIZE, f) != NUM8_PAYLOAD_SIZE)
+    {
+        fclose(f);
+        remove(path);
+        return NUM8_STATUS_FLUSH_FAILED;
+    }
+
+    st = num8_sync_file(f);
+    if (st != NUM8_STATUS_OK)
+    {
+        fclose(f);
+        remove(path);
+        return st;
+    }
+
+    fclose(f);
+    return NUM8_STATUS_OK;
+}
+
 static uint32_t num8_crc32(const uint8_t* data, size_t len)
 {
     uint32_t crc = 0xFFFFFFFFu;
@@ -248,7 +435,8 @@ static void num8_fill_header_bytes(
     uint64_t set_count,
     uint64_t generation,
     uint32_t flags,
-    uint32_t payload_crc32)
+    uint32_t payload_crc32,
+    uint32_t commit_state)
 {
     uint32_t crc;
     memset(out_header, 0, NUM8_HEADER_SIZE);
@@ -267,6 +455,7 @@ static void num8_fill_header_bytes(
     num8_store_le32(&out_header[36], 0u);
     num8_store_le32(&out_header[40], payload_crc32);
     num8_store_le64(&out_header[44], generation);
+    num8_store_le32(&out_header[52], commit_state);
 
     crc = num8_crc32(out_header, NUM8_HEADER_SIZE);
     num8_store_le32(&out_header[36], crc);
@@ -294,7 +483,8 @@ static num8_status_t num8_parse_and_validate_header(const uint8_t* header, num8_
     out_fields->header_crc32 = num8_load_le32(&header[36]);
     out_fields->payload_crc32 = num8_load_le32(&header[40]);
     out_fields->generation = num8_load_le64(&header[44]);
-    memcpy(out_fields->reserved, &header[52], sizeof(out_fields->reserved));
+    out_fields->commit_state = num8_load_le32(&header[52]);
+    memcpy(out_fields->reserved, &header[56], sizeof(out_fields->reserved));
 
     if (out_fields->version_major != NUM8_VERSION_MAJOR || out_fields->version_minor != NUM8_VERSION_MINOR)
     {
@@ -308,7 +498,7 @@ static num8_status_t num8_parse_and_validate_header(const uint8_t* header, num8_
     {
         return NUM8_STATUS_CORRUPTED;
     }
-    if (out_fields->flags != 0u)
+    if (out_fields->flags != 0u || out_fields->commit_state != 1u)
     {
         return NUM8_STATUS_CORRUPTED;
     }
@@ -430,13 +620,18 @@ static num8_status_t num8_validate_file_snapshot(const num8_engine_t* engine)
         return st;
     }
 
-    if (fields.payload_crc32 != 0u)
+    if (state->payload_crc_enabled != 0)
     {
         payload_crc = num8_crc32(state->payload, NUM8_PAYLOAD_SIZE);
         if (payload_crc != fields.payload_crc32)
         {
             return NUM8_STATUS_PAYLOAD_CRC_MISMATCH;
         }
+    }
+
+    if (num8_payload_popcount(state->payload) != state->set_count)
+    {
+        return NUM8_STATUS_CORRUPTED;
     }
 
     if (fseek(f, cur, SEEK_SET) != 0)
@@ -449,53 +644,72 @@ static num8_status_t num8_validate_file_snapshot(const num8_engine_t* engine)
 
 num8_status_t num8_create(const char* path, num8_engine_t* engine)
 {
-    FILE* f;
-    uint8_t header[NUM8_HEADER_SIZE];
+    FILE* existing;
     uint8_t* payload;
+    char* temp_path;
     num8_engine_state_t* state;
     num8_status_t st;
+    uint32_t payload_crc32;
 
     if (path == NULL || engine == NULL)
     {
         return NUM8_STATUS_INVALID_ARGUMENT;
     }
-
     if (num8_engine_is_open(engine))
     {
         return NUM8_STATUS_ALREADY_OPEN;
     }
 
-    f = fopen(path, "wb+");
-    if (f == NULL)
+    existing = fopen(path, "rb");
+    if (existing != NULL)
     {
-        num8_engine_clear(engine);
-        return NUM8_STATUS_CREATE_FAILED;
+        fclose(existing);
+        return NUM8_STATUS_ALREADY_EXISTS;
     }
 
     payload = (uint8_t*)calloc(NUM8_PAYLOAD_SIZE, 1);
     if (payload == NULL)
     {
-        fclose(f);
         num8_engine_clear(engine);
         return NUM8_STATUS_OUT_OF_MEMORY;
     }
 
-    num8_fill_header_bytes(header, 0u, 0u, 0u, 0u);
-
-    if (fwrite(header, 1, NUM8_HEADER_SIZE, f) != NUM8_HEADER_SIZE
-        || fwrite(payload, 1, NUM8_PAYLOAD_SIZE, f) != NUM8_PAYLOAD_SIZE)
+    temp_path = (char*)malloc(strlen(path) + 5u);
+    if (temp_path == NULL)
     {
         free(payload);
-        fclose(f);
         num8_engine_clear(engine);
-        return NUM8_STATUS_IO_ERROR;
+        return NUM8_STATUS_OUT_OF_MEMORY;
     }
+    strcpy(temp_path, path);
+    strcat(temp_path, ".tmp");
 
-    st = num8_sync_file(f);
+    payload_crc32 = num8_crc32(payload, NUM8_PAYLOAD_SIZE);
+    st = num8_write_store_file(temp_path, payload, 0u, 0u, 0u, payload_crc32, 1u);
     if (st != NUM8_STATUS_OK)
     {
+        remove(temp_path);
+        free(temp_path);
         free(payload);
-        fclose(f);
+        num8_engine_clear(engine);
+        return st;
+    }
+
+    st = num8_atomic_replace_file(temp_path, path);
+    if (st != NUM8_STATUS_OK)
+    {
+        remove(temp_path);
+        free(temp_path);
+        free(payload);
+        num8_engine_clear(engine);
+        return st;
+    }
+    remove(temp_path);
+    st = num8_sync_parent_dir(path);
+    if (st != NUM8_STATUS_OK)
+    {
+        free(temp_path);
+        free(payload);
         num8_engine_clear(engine);
         return st;
     }
@@ -503,17 +717,42 @@ num8_status_t num8_create(const char* path, num8_engine_t* engine)
     state = (num8_engine_state_t*)(void*)engine->opaque;
     memset(state, 0, sizeof(*state));
     state->magic = NUM8_ENGINE_STATE_MAGIC;
-    state->file_handle = f;
+    state->file_handle = fopen(path, "rb+");
+    if (state->file_handle == NULL)
+    {
+        free(temp_path);
+        free(payload);
+        num8_engine_clear(engine);
+        return NUM8_STATUS_CREATE_FAILED;
+    }
     state->payload = payload;
+    state->path = num8_strdup_local(path);
+    if (state->path == NULL)
+    {
+        num8_state_release(state);
+        free(temp_path);
+        num8_engine_clear(engine);
+        return NUM8_STATUS_OUT_OF_MEMORY;
+    }
     state->set_count = 0u;
     state->generation = 0u;
     state->flags = 0u;
-    state->payload_crc32 = 0u;
-    state->payload_crc_enabled = 0;
+    state->payload_crc32 = payload_crc32;
+    state->payload_crc_enabled = 1;
     state->is_open = 1;
     state->is_read_only = 0;
     state->is_dirty = 0;
 
+    st = num8_validate_file_snapshot(engine);
+    if (st != NUM8_STATUS_OK)
+    {
+        num8_state_release(state);
+        free(temp_path);
+        num8_engine_clear(engine);
+        return st;
+    }
+
+    free(temp_path);
     return NUM8_STATUS_OK;
 }
 
@@ -578,38 +817,40 @@ num8_status_t num8_open(const char* path, num8_open_mode_t mode, num8_engine_t* 
         return NUM8_STATUS_IO_ERROR;
     }
 
-    if (fields.payload_crc32 != 0u)
-    {
-        uint32_t payload_crc = num8_crc32(payload, NUM8_PAYLOAD_SIZE);
-        if (payload_crc != fields.payload_crc32)
-        {
-            free(payload);
-            fclose(f);
-            num8_engine_clear(engine);
-            return NUM8_STATUS_RECOVERY_REQUIRED;
-        }
-    }
-
     state = (num8_engine_state_t*)(void*)engine->opaque;
     memset(state, 0, sizeof(*state));
     state->magic = NUM8_ENGINE_STATE_MAGIC;
     state->file_handle = f;
     state->payload = payload;
+    state->path = num8_strdup_local(path);
+    if (state->path == NULL)
+    {
+        num8_state_release(state);
+        num8_engine_clear(engine);
+        return NUM8_STATUS_OUT_OF_MEMORY;
+    }
     state->set_count = fields.set_count;
     state->generation = fields.generation;
     state->flags = fields.flags;
     state->payload_crc32 = fields.payload_crc32;
-    state->payload_crc_enabled = fields.payload_crc32 != 0u ? 1 : 0;
+    state->payload_crc_enabled = 1;
     state->is_open = 1;
     state->is_read_only = mode == NUM8_OPEN_READ_ONLY ? 1 : 0;
     state->is_dirty = 0;
+
+    st = num8_validate_file_snapshot(engine);
+    if (st != NUM8_STATUS_OK)
+    {
+        num8_state_release(state);
+        num8_engine_clear(engine);
+        return st;
+    }
 
     return NUM8_STATUS_OK;
 }
 
 num8_status_t num8_close(num8_engine_t* engine)
 {
-    FILE* f;
     num8_engine_state_t* state;
     num8_status_t st;
 
@@ -633,17 +874,7 @@ num8_status_t num8_close(num8_engine_t* engine)
         }
     }
 
-    f = state->file_handle;
-    if (f != NULL)
-    {
-        fclose(f);
-    }
-
-    if (state->payload != NULL)
-    {
-        free(state->payload);
-    }
-
+    num8_state_release(state);
     num8_engine_clear(engine);
     return NUM8_STATUS_OK;
 }
@@ -825,11 +1056,12 @@ num8_status_t num8_clear_all(num8_engine_t* engine)
 
 num8_status_t num8_flush(num8_engine_t* engine)
 {
-    FILE* f;
-    uint8_t header[NUM8_HEADER_SIZE];
     num8_engine_state_t* state;
     uint64_t next_generation;
     uint32_t payload_crc32 = 0u;
+    char* temp_path;
+    num8_status_t st;
+    FILE* reopened;
 
     if (engine == NULL)
     {
@@ -854,52 +1086,87 @@ num8_status_t num8_flush(num8_engine_t* engine)
         return NUM8_STATUS_GENERATION_EXHAUSTED;
     }
 
-    f = state->file_handle;
-    if (f == NULL)
+    st = num8_validate_path_state(state);
+    if (st != NUM8_STATUS_OK)
     {
-        return NUM8_STATUS_IO_ERROR;
+        return st;
     }
 
     next_generation = state->generation + 1u;
-
-    if (fseek(f, NUM8_HEADER_SIZE, SEEK_SET) != 0)
-    {
-        return NUM8_STATUS_FLUSH_FAILED;
-    }
-    if (fwrite(state->payload, 1, NUM8_PAYLOAD_SIZE, f) != NUM8_PAYLOAD_SIZE)
-    {
-        return NUM8_STATUS_FLUSH_FAILED;
-    }
-
     if (state->payload_crc_enabled != 0)
     {
         payload_crc32 = num8_crc32(state->payload, NUM8_PAYLOAD_SIZE);
     }
 
-    num8_fill_header_bytes(
-        header,
+    temp_path = (char*)malloc(strlen(state->path) + 5u);
+    if (temp_path == NULL)
+    {
+        return NUM8_STATUS_OUT_OF_MEMORY;
+    }
+    strcpy(temp_path, state->path);
+    strcat(temp_path, ".tmp");
+
+    st = num8_write_store_file(
+        temp_path,
+        state->payload,
         state->set_count,
         next_generation,
         state->flags,
-        payload_crc32);
-
-    if (fseek(f, 0, SEEK_SET) != 0)
+        payload_crc32,
+        1u);
+    if (st != NUM8_STATUS_OK)
     {
-        return NUM8_STATUS_FLUSH_FAILED;
-    }
-    if (fwrite(header, 1, NUM8_HEADER_SIZE, f) != NUM8_HEADER_SIZE)
-    {
-        return NUM8_STATUS_FLUSH_FAILED;
+        remove(temp_path);
+        free(temp_path);
+        return st;
     }
 
-    if (num8_sync_file(f) != NUM8_STATUS_OK)
+    if (state->file_handle != NULL)
     {
-        return NUM8_STATUS_FLUSH_FAILED;
+        fclose(state->file_handle);
+        state->file_handle = NULL;
     }
 
+    st = num8_atomic_replace_file(temp_path, state->path);
+    remove(temp_path);
+    if (st != NUM8_STATUS_OK)
+    {
+        reopened = fopen(state->path, "rb+");
+        if (reopened == NULL)
+        {
+            free(temp_path);
+            return st;
+        }
+        state->file_handle = reopened;
+        free(temp_path);
+        return st;
+    }
+
+    st = num8_sync_parent_dir(state->path);
+    if (st != NUM8_STATUS_OK)
+    {
+        reopened = fopen(state->path, "rb+");
+        if (reopened == NULL)
+        {
+            free(temp_path);
+            return st;
+        }
+        state->file_handle = reopened;
+        free(temp_path);
+        return st;
+    }
+
+    reopened = fopen(state->path, "rb+");
+    if (reopened == NULL)
+    {
+        free(temp_path);
+        return NUM8_STATUS_ATOMIC_REPLACE_FAILED;
+    }
+    state->file_handle = reopened;
     state->generation = next_generation;
     state->payload_crc32 = payload_crc32;
     state->is_dirty = 0;
+    free(temp_path);
     return NUM8_STATUS_OK;
 }
 
