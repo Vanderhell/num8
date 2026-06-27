@@ -95,9 +95,13 @@ if(NUM8_BUILD_TESTS)
     )
 endif()
 
-set(NUM8_PACKAGE_SOURCES num8)
 if(NUM8_BUILD_SHARED)
-    list(APPEND NUM8_PACKAGE_SOURCES num8_shared)
+    set_target_properties(num8 PROPERTIES EXPORT_NAME num8_static)
+    set_target_properties(num8_shared PROPERTIES EXPORT_NAME num8)
+    set(NUM8_PACKAGE_SOURCES num8 num8_shared)
+else()
+    set_target_properties(num8 PROPERTIES EXPORT_NAME num8)
+    set(NUM8_PACKAGE_SOURCES num8)
 endif()
 
 install(TARGETS ${NUM8_PACKAGE_SOURCES}

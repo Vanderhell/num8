@@ -18,6 +18,13 @@ project(num8_consumer C)
 find_package(num8 CONFIG REQUIRED)
 add_executable(num8_consumer main.c)
 target_link_libraries(num8_consumer PRIVATE num8::num8)
+if(WIN32)
+    add_custom_command(TARGET num8_consumer POST_BUILD
+        COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+                "$<TARGET_FILE:num8::num8>"
+                "$<TARGET_FILE_DIR:num8_consumer>"
+    )
+endif()
 ]])
 
 file(WRITE "${source_dir}/main.c" [[
@@ -149,12 +156,28 @@ set(run_candidates
 )
 
 set(run_ok 0)
+if(APPLE)
+    set(run_env_var "DYLD_LIBRARY_PATH=${prefix}/lib:$ENV{DYLD_LIBRARY_PATH}")
+elseif(NOT WIN32)
+    set(run_env_var "LD_LIBRARY_PATH=${prefix}/lib:$ENV{LD_LIBRARY_PATH}")
+endif()
+
 foreach(candidate IN LISTS run_candidates)
     if(EXISTS "${candidate}")
+        get_filename_component(candidate_dir "${candidate}" DIRECTORY)
+        if(WIN32)
+            execute_process(
+                COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${prefix}/bin/num8.dll" "${candidate_dir}"
+                RESULT_VARIABLE copy_result
+            )
+            if(NOT copy_result EQUAL 0)
+                message(FATAL_ERROR "consumer dll copy failed: ${copy_result}")
+            endif()
+        endif()
         execute_process(
             COMMAND "${candidate}"
             RESULT_VARIABLE candidate_result
-            WORKING_DIRECTORY "${build_dir}"
+            WORKING_DIRECTORY "${candidate_dir}"
         )
         if(candidate_result EQUAL 0)
             set(run_ok 1)
