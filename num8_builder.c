@@ -50,7 +50,6 @@ static int read_builder_line(
     num8_status_t* out_status)
 {
     size_t len;
-    int ch;
 
     if (fgets(line, (int)cap, in) == NULL)
     {
@@ -92,6 +91,7 @@ static int read_builder_line(
     {
         if (!feof(in))
         {
+            int ch;
             do
             {
                 ch = fgetc(in);

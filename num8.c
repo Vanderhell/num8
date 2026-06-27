@@ -805,6 +805,9 @@ num8_status_t num8_create(const char* path, num8_engine_t* engine)
         return st;
     }
     remove(temp_path);
+#if defined(_WIN32)
+    (void)num8_sync_parent_dir(path);
+#else
     st = num8_sync_parent_dir(path);
     if (st != NUM8_STATUS_OK)
     {
@@ -813,6 +816,7 @@ num8_status_t num8_create(const char* path, num8_engine_t* engine)
         num8_engine_clear(engine);
         return st;
     }
+#endif
 
     state = (num8_engine_state_t*)(void*)engine->opaque;
     memset(state, 0, sizeof(*state));
@@ -1276,6 +1280,9 @@ num8_status_t num8_flush(num8_engine_t* engine)
         return st;
     }
 
+#if defined(_WIN32)
+    (void)num8_sync_parent_dir(state->path);
+#else
     st = num8_sync_parent_dir(state->path);
     if (st != NUM8_STATUS_OK)
     {
@@ -1289,6 +1296,7 @@ num8_status_t num8_flush(num8_engine_t* engine)
         free(temp_path);
         return st;
     }
+#endif
 
     reopened = fopen(state->path, "rb+");
     if (reopened == NULL)

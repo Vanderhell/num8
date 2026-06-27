@@ -1,0 +1,166 @@
+set(prefix "@NUM8_EXTERNAL_CONSUMER_PREFIX@")
+set(source_dir "@NUM8_EXTERNAL_CONSUMER_SOURCE_DIR@")
+set(build_dir "@NUM8_EXTERNAL_CONSUMER_BUILD_DIR@")
+set(generator "@NUM8_EXTERNAL_CONSUMER_GENERATOR@")
+set(platform "@NUM8_EXTERNAL_CONSUMER_PLATFORM@")
+set(toolset "@NUM8_EXTERNAL_CONSUMER_TOOLSET@")
+set(build_root "@CMAKE_CURRENT_BINARY_DIR@")
+set(install_config "@NUM8_TEST_INSTALL_CONFIG@")
+
+file(REMOVE_RECURSE "${prefix}" "${source_dir}" "${build_dir}")
+file(MAKE_DIRECTORY "${prefix}" "${source_dir}" "${build_dir}")
+
+file(WRITE "${source_dir}/CMakeLists.txt" [[
+cmake_minimum_required(VERSION 3.16)
+project(num8_consumer C)
+find_package(num8 CONFIG REQUIRED)
+add_executable(num8_consumer main.c)
+target_link_libraries(num8_consumer PRIVATE num8::num8)
+]])
+
+file(WRITE "${source_dir}/main.c" [[
+#include "num8.h"
+
+#include <stdio.h>
+
+int main(void)
+{
+    num8_engine_t e = {0};
+    int exists = -1;
+    uint64_t count = 0;
+
+    if (num8_create("consumer_smoke.num8", &e) != NUM8_STATUS_OK)
+    {
+        fprintf(stderr, "create failed\n");
+        return 1;
+    }
+    if (num8_add_u32(&e, 42u) != NUM8_STATUS_ADDED)
+    {
+        fprintf(stderr, "add failed\n");
+        return 1;
+    }
+    if (num8_exists_u32(&e, 42u, &exists) != NUM8_STATUS_OK || exists != 1)
+    {
+        fprintf(stderr, "exists failed\n");
+        return 1;
+    }
+    if (num8_count(&e, &count) != NUM8_STATUS_OK || count != 1u)
+    {
+        fprintf(stderr, "count failed\n");
+        return 1;
+    }
+    if (num8_flush(&e) != NUM8_STATUS_OK)
+    {
+        fprintf(stderr, "flush failed\n");
+        return 1;
+    }
+    if (num8_validate(&e) != NUM8_STATUS_OK)
+    {
+        fprintf(stderr, "validate failed\n");
+        return 1;
+    }
+    if (num8_close(&e) != NUM8_STATUS_OK)
+    {
+        fprintf(stderr, "close failed\n");
+        return 1;
+    }
+
+    if (num8_open("consumer_smoke.num8", NUM8_OPEN_READ_ONLY, &e) != NUM8_STATUS_OK)
+    {
+        fprintf(stderr, "reopen failed\n");
+        return 1;
+    }
+    if (num8_exists_u32(&e, 42u, &exists) != NUM8_STATUS_OK || exists != 1)
+    {
+        fprintf(stderr, "reopen exists failed\n");
+        return 1;
+    }
+    if (num8_close(&e) != NUM8_STATUS_OK)
+    {
+        fprintf(stderr, "final close failed\n");
+        return 1;
+    }
+
+    remove("consumer_smoke.num8");
+    return 0;
+}
+]])
+
+if(generator STREQUAL "")
+    set(generator_args "")
+else()
+    set(generator_args -G "${generator}")
+endif()
+if(platform STREQUAL "")
+    set(platform_args "")
+else()
+    set(platform_args -A "${platform}")
+endif()
+if(toolset STREQUAL "")
+    set(toolset_args "")
+else()
+    set(toolset_args -T "${toolset}")
+endif()
+
+execute_process(
+    COMMAND "${CMAKE_COMMAND}" --install "${build_root}" --config "${install_config}" --prefix "${prefix}"
+    RESULT_VARIABLE install_result
+)
+if(NOT install_result EQUAL 0)
+    message(FATAL_ERROR "install failed: ${install_result}")
+endif()
+
+execute_process(
+    COMMAND "${CMAKE_COMMAND}"
+        -S "${source_dir}"
+        -B "${build_dir}"
+        ${generator_args}
+        ${platform_args}
+        ${toolset_args}
+        "-DCMAKE_PREFIX_PATH=${prefix}"
+    RESULT_VARIABLE configure_result
+)
+if(NOT configure_result EQUAL 0)
+    message(FATAL_ERROR "consumer configure failed: ${configure_result}")
+endif()
+
+execute_process(
+    COMMAND "${CMAKE_COMMAND}" --build "${build_dir}" --config "${install_config}"
+    RESULT_VARIABLE build_result
+)
+if(NOT build_result EQUAL 0)
+    message(FATAL_ERROR "consumer build failed: ${build_result}")
+endif()
+
+if(WIN32)
+    set(exe_name "num8_consumer.exe")
+else()
+    set(exe_name "num8_consumer")
+endif()
+
+set(run_candidates
+    "${build_dir}/${exe_name}"
+    "${build_dir}/Debug/${exe_name}"
+    "${build_dir}/Release/${exe_name}"
+    "${build_dir}/RelWithDebInfo/${exe_name}"
+    "${build_dir}/MinSizeRel/${exe_name}"
+)
+
+set(run_ok 0)
+foreach(candidate IN LISTS run_candidates)
+    if(EXISTS "${candidate}")
+        execute_process(
+            COMMAND "${candidate}"
+            RESULT_VARIABLE candidate_result
+            WORKING_DIRECTORY "${build_dir}"
+        )
+        if(candidate_result EQUAL 0)
+            set(run_ok 1)
+            break()
+        endif()
+    endif()
+endforeach()
+
+if(NOT run_ok)
+    message(FATAL_ERROR "consumer run failed")
+endif()
