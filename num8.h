@@ -87,7 +87,11 @@ num8_status_t num8_count(const num8_engine_t* engine, uint64_t* out_count);
 num8_status_t num8_clear_all(num8_engine_t* engine);
 /* Commits payload + header CRC to file; clears dirty flag on success. */
 num8_status_t num8_flush(num8_engine_t* engine);
-/* Validates in-memory integrity; when clean, also verifies on-disk snapshot consistency. */
+/* Validates the current in-memory snapshot. Clean engines may also be verified against disk. */
+num8_status_t num8_validate_memory(const num8_engine_t* engine);
+/* Validates the on-disk snapshot associated with the engine path. */
+num8_status_t num8_validate_disk(const num8_engine_t* engine);
+/* Validates current snapshot; dirty engines are checked in memory only. */
 num8_status_t num8_validate(const num8_engine_t* engine);
 
 #ifdef __cplusplus

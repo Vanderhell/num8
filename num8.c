@@ -567,78 +567,88 @@ static num8_status_t num8_validate_file_snapshot(const num8_engine_t* engine)
 {
     const num8_engine_state_t* state = num8_engine_state_const(engine);
     FILE* f;
-    long cur;
     long file_size;
     uint8_t header[NUM8_HEADER_SIZE];
     num8_header_fields_t fields;
     num8_status_t st;
-    uint32_t payload_crc;
+    uint8_t* payload;
 
-    if (state == NULL || state->is_open == 0)
+    if (state == NULL || state->is_open == 0 || state->path == NULL)
     {
         return NUM8_STATUS_NOT_OPEN;
     }
 
-    f = state->file_handle;
+    f = fopen(state->path, "rb");
     if (f == NULL)
-    {
-        return NUM8_STATUS_IO_ERROR;
-    }
-
-    cur = ftell(f);
-    if (cur < 0)
     {
         return NUM8_STATUS_IO_ERROR;
     }
 
     if (fseek(f, 0, SEEK_END) != 0)
     {
+        fclose(f);
         return NUM8_STATUS_IO_ERROR;
     }
     file_size = ftell(f);
     if (file_size < 0)
     {
+        fclose(f);
         return NUM8_STATUS_IO_ERROR;
     }
     if ((uint64_t)file_size != (uint64_t)NUM8_HEADER_SIZE + (uint64_t)NUM8_PAYLOAD_SIZE)
     {
+        fclose(f);
         return NUM8_STATUS_SIZE_MISMATCH;
     }
     if (fseek(f, 0, SEEK_SET) != 0)
     {
+        fclose(f);
         return NUM8_STATUS_IO_ERROR;
     }
 
     if (fread(header, 1, NUM8_HEADER_SIZE, f) != NUM8_HEADER_SIZE)
     {
+        fclose(f);
         return NUM8_STATUS_IO_ERROR;
     }
 
     st = num8_parse_and_validate_header(header, &fields);
     if (st != NUM8_STATUS_OK)
     {
+        fclose(f);
         return st;
     }
 
-    if (state->payload_crc_enabled != 0)
+    payload = (uint8_t*)malloc(NUM8_PAYLOAD_SIZE);
+    if (payload == NULL)
     {
-        payload_crc = num8_crc32(state->payload, NUM8_PAYLOAD_SIZE);
-        if (payload_crc != fields.payload_crc32)
-        {
-            return NUM8_STATUS_PAYLOAD_CRC_MISMATCH;
-        }
+        fclose(f);
+        return NUM8_STATUS_OUT_OF_MEMORY;
     }
 
-    if (num8_payload_popcount(state->payload) != state->set_count)
+    if (fread(payload, 1, NUM8_PAYLOAD_SIZE, f) != NUM8_PAYLOAD_SIZE)
     {
-        return NUM8_STATUS_CORRUPTED;
-    }
-
-    if (fseek(f, cur, SEEK_SET) != 0)
-    {
+        free(payload);
+        fclose(f);
         return NUM8_STATUS_IO_ERROR;
     }
 
+    if (num8_crc32(payload, NUM8_PAYLOAD_SIZE) != fields.payload_crc32)
+    {
+        free(payload);
+        fclose(f);
+        return NUM8_STATUS_PAYLOAD_CRC_MISMATCH;
+    }
+
+    if (num8_payload_popcount(payload) != fields.set_count)
+    {
+        free(payload);
+        fclose(f);
+        return NUM8_STATUS_CORRUPTED;
+    }
+
+    free(payload);
+    fclose(f);
     return NUM8_STATUS_OK;
 }
 
@@ -925,11 +935,19 @@ num8_status_t num8_add_u32(num8_engine_t* engine, uint32_t value)
     {
         return NUM8_STATUS_INVALID_NUMBER;
     }
+    if (state->set_count > NUM8_DOMAIN_SIZE)
+    {
+        return NUM8_STATUS_CORRUPTED;
+    }
 
     payload = state->payload;
     if (num8_test_bit(payload, value))
     {
         return NUM8_STATUS_ALREADY_EXISTS;
+    }
+    if (state->set_count >= NUM8_DOMAIN_SIZE)
+    {
+        return NUM8_STATUS_CORRUPTED;
     }
 
     num8_set_bit(payload, value);
@@ -959,6 +977,10 @@ num8_status_t num8_remove_u32(num8_engine_t* engine, uint32_t value)
     if (!num8_is_valid_u32(value))
     {
         return NUM8_STATUS_INVALID_NUMBER;
+    }
+    if (state->set_count == 0u)
+    {
+        return NUM8_STATUS_CORRUPTED;
     }
 
     payload = state->payload;
@@ -1170,11 +1192,10 @@ num8_status_t num8_flush(num8_engine_t* engine)
     return NUM8_STATUS_OK;
 }
 
-num8_status_t num8_validate(const num8_engine_t* engine)
+num8_status_t num8_validate_memory(const num8_engine_t* engine)
 {
     const uint8_t* payload;
     uint64_t real_count;
-    num8_status_t st;
     const num8_engine_state_t* state;
 
     if (engine == NULL)
@@ -1199,23 +1220,46 @@ num8_status_t num8_validate(const num8_engine_t* engine)
         return NUM8_STATUS_CORRUPTED;
     }
 
-    if (state->payload_crc_enabled != 0)
-    {
-        uint32_t payload_crc = num8_crc32(payload, NUM8_PAYLOAD_SIZE);
-        if (payload_crc != state->payload_crc32)
-        {
-            return NUM8_STATUS_PAYLOAD_CRC_MISMATCH;
-        }
-    }
-
-    if (state->is_dirty == 0)
-    {
-        st = num8_validate_file_snapshot(engine);
-        if (st != NUM8_STATUS_OK)
-        {
-            return st;
-        }
-    }
-
     return NUM8_STATUS_OK;
+}
+
+num8_status_t num8_validate_disk(const num8_engine_t* engine)
+{
+    const num8_engine_state_t* state;
+    num8_status_t st;
+
+    if (engine == NULL)
+    {
+        return NUM8_STATUS_INVALID_ARGUMENT;
+    }
+    state = num8_engine_state_const(engine);
+    if (state == NULL || state->is_open == 0 || state->payload == NULL)
+    {
+        return NUM8_STATUS_NOT_OPEN;
+    }
+
+    st = num8_validate_file_snapshot(engine);
+    return st;
+}
+
+num8_status_t num8_validate(const num8_engine_t* engine)
+{
+    const num8_engine_state_t* state;
+
+    if (engine == NULL)
+    {
+        return NUM8_STATUS_INVALID_ARGUMENT;
+    }
+    state = num8_engine_state_const(engine);
+    if (state == NULL || state->is_open == 0 || state->payload == NULL)
+    {
+        return NUM8_STATUS_NOT_OPEN;
+    }
+
+    if (state->is_dirty != 0)
+    {
+        return num8_validate_memory(engine);
+    }
+
+    return num8_validate_disk(engine);
 }
